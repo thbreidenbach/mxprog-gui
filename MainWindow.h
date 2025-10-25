@@ -33,6 +33,9 @@ private slots:
     void onProcError(QProcess::ProcessError);
     void refreshDevices();
 
+    // NEU: echter Slot für den Watchdog
+    void onWatchdogTimeout();
+
 private:
     struct Cmd {
         QStringList args;
@@ -44,7 +47,6 @@ private:
     void enqueue(const QStringList& args, const QString& label = QString(), bool log=true, int timeoutMs=0);
     void runNext();
 
-    // helpers
     QByteArray buildMonolithic2MiB() const;
     QString timestampedDumpName() const;
     QString mxprogPath() const;
@@ -53,7 +55,6 @@ private:
     void loadSettings();
     void saveSettings() const;
 
-    // log/progress handling
     void resetProgressTracking();
     void appendSmart(const QString& chunk);
 
@@ -71,12 +72,10 @@ private:
     QQueue<Cmd> m_queue;
     bool        m_running = false;
 
-    // progress/status
-    QProgressBar*     m_progBar = nullptr;
-    int               m_progressBlock = -1;
-    bool              m_prevWasBlank  = false;
+    QProgressBar*      m_progBar = nullptr;
+    int                m_progressBlock = -1;
+    bool               m_prevWasBlank  = false;
     QRegularExpression m_rePercent{R"(^\d+%$)"};
 
-    // timeout watchdog
     QTimer* m_watchdog = nullptr;
 };

@@ -133,9 +133,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_progBar->setValue(0);
     statusBar()->addPermanentWidget(m_progBar, 0);
 
-    // watchdog
+    // Watchdog: EINMAL verbinden (keine unique-connection-Warnung)
     m_watchdog = new QTimer(this);
     m_watchdog->setSingleShot(true);
+    connect(m_watchdog, &QTimer::timeout, this, &MainWindow::onWatchdogTimeout);
 }
 
 void MainWindow::refreshDevices() {
@@ -207,7 +208,7 @@ QString MainWindow::mxprogPath() const {
 void MainWindow::resetProgressTracking() {
     m_progressBlock = -1;
     m_prevWasBlank  = false;
-    m_progBar->setValue(0);
+    if (m_progBar) m_progBar->setValue(0);
 }
 
 void MainWindow::appendSmart(const QString& chunk) {
@@ -220,13 +221,11 @@ void MainWindow::appendSmart(const QString& chunk) {
         int cr = line.lastIndexOf('\r');
         if (cr >= 0) line = line.mid(cr + 1);
 
-        // Prozent erkennen, Statusleiste updaten
+        // Prozent erkennen, Statusbar updaten, Log nicht fluten
         auto m = m_rePercent.match(line);
         if (m.hasMatch()) {
             bool ok=false; int val = line.left(line.size()-1).toInt(&ok);
-            if (ok) m_progBar->setValue(qBound(0, val, 100));
-            // Fortschrittszeilen nicht „aufblähen“: nur im Log anfügen, wenn du es sehen willst:
-            // m_log->appendPlainText(line);
+            if (ok && m_progBar) m_progBar->setValue(qBound(0, val, 100));
             m_prevWasBlank = false;
             continue;
         }
@@ -252,7 +251,6 @@ void MainWindow::onProcReadyRead() {
 }
 
 void MainWindow::onProcFinished(int code, QProcess::ExitStatus st) {
-    // Stop watchdog
     m_watchdog->stop();
 
     if (st == QProcess::NormalExit && code == 0) {
@@ -279,9 +277,19 @@ void MainWindow::onProcError(QProcess::ProcessError e) {
     default:                      why = "UnknownError"; break;
     }
     m_log->appendPlainText("QProcess error: " + why + (m_proc ? " — " + m_proc->errorString() : ""));
-    // Queue weiterführen oder abbrechen? Wir führen weiter, falls noch Jobs da sind:
+    // Weiter zur nächsten Queue-Aufgabe (oder hier abbrechen, wenn gewünscht)
     m_running = false;
     runNext();
+}
+
+void MainWindow::onWatchdogTimeout() {
+    m_log->appendPlainText("Watchdog: Timed out. Killing process and clearing queue.");
+    if (m_proc && m_proc->state() != QProcess::NotRunning) {
+        m_proc->kill();
+    }
+    m_queue.clear();
+    m_running = false;
+    resetProgressTracking();
 }
 
 void MainWindow::enqueue(const QStringList& args, const QString& label, bool log, int timeoutMs) {
@@ -289,7 +297,7 @@ void MainWindow::enqueue(const QStringList& args, const QString& label, bool log
     QString devArg = selectedDeviceArg();
     if (!devArg.isEmpty()) {
         auto parts = devArg.split(' ');
-        realArgs << parts;
+        realArgs << parts; // "-d" "<device>"
     }
     realArgs << args;
 
@@ -320,13 +328,22 @@ void MainWindow::runNext() {
     const QString prog = mxprogPath();
     if (c.log) m_log->appendPlainText("$ " + prog + " " + c.args.join(' '));
 
-    // PATH ergänzen, falls nur Name benutzt wird
+    // PATH ergänzen (hilft, falls nur "mxprog" ohne absoluter Pfad)
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
 #ifdef Q_OS_MAC
-    QString path = env.value("PATH");
-    if (!path.contains("/usr/local/bin"))    path += ":/usr/local/bin";
-    if (!path.contains("/opt/homebrew/bin")) path += ":/opt/homebrew/bin";
-    env.insert("PATH", path);
+    {
+        QString path = env.value("PATH");
+        if (!path.contains("/usr/local/bin"))    path += ":/usr/local/bin";
+        if (!path.contains("/opt/homebrew/bin")) path += ":/opt/homebrew/bin";
+        env.insert("PATH", path);
+    }
+#endif
+#ifdef Q_OS_LINUX
+    {
+        QString path = env.value("PATH");
+        if (!path.contains("/usr/local/bin")) path += ":/usr/local/bin";
+        env.insert("PATH", path);
+    }
 #endif
     m_proc->setProcessEnvironment(env);
 
@@ -334,18 +351,11 @@ void MainWindow::runNext() {
     m_proc->setArguments(c.args);
     m_proc->start();
 
-    // Timeout-Überwachung (0 = aus)
+    // Timeout-Überwachung (0 = aus) – nur Intervall + Start, kein mehrfaches connect
     m_watchdog->stop();
     if (c.timeoutMs > 0) {
-        m_watchdog->start(c.timeoutMs);
-        // falls getriggert:
-        connect(m_watchdog, &QTimer::timeout, this, [this]() {
-            if (m_proc && m_proc->state() != QProcess::NotRunning) {
-                m_log->appendPlainText("Watchdog: Timed out. Killing process and clearing queue.");
-                m_proc->kill();
-                m_queue.clear();
-            }
-        }, Qt::UniqueConnection);
+        m_watchdog->setInterval(c.timeoutMs);
+        m_watchdog->start();
     }
 }
 
@@ -373,10 +383,10 @@ void MainWindow::writeSlot(int bank, const QByteArray& img512k) {
     f.write(img512k);
     f.close();
 
-    // Zeitlimits (Beispielwerte – passe sie an deinen Programmer an)
-    const int tEraseMs = 90'000;  // 90s
-    const int tWriteMs = 240'000; // 4min
-    const int tVerifyMs= 120'000; // 2min
+    // Beispiel-Timeouts (anpassen an dein Setup)
+    const int tEraseMs  =  90'000;
+    const int tWriteMs  = 240'000;
+    const int tVerifyMs = 120'000;
 
     if (m_chkErase->isChecked()) {
         enqueue(QStringList() << "-y" << "-e", "erase", true, tEraseMs);
@@ -423,14 +433,14 @@ void MainWindow::writeAllMonolithic() {
     }
 
     // Beispiel-Timeouts (anpassen)
-    const int tEraseMs = 120'000;
-    const int tWriteMs = 300'000;
-    const int tVerifyMs= 180'000;
+    const int tEraseMs  = 120'000;
+    const int tWriteMs  = 300'000;
+    const int tVerifyMs = 180'000;
 
     if (m_chkErase->isChecked()) {
         enqueue(QStringList() << "-y" << "-e", "erase", true, tEraseMs);
     }
-    // ohne -b (Adress 0). Wenn dein mxprog -a 0 verlangt, ergänzen:
+    // ohne -b (ab Adresse 0). Falls dein mxprog explizit -a 0 will: hier ergänzen.
     enqueue(QStringList() << "-w" << path, "write-all", true, tWriteMs);
     if (m_chkVerify->isChecked()) {
         enqueue(QStringList() << "-v" << path, "verify-all", true, tVerifyMs);
