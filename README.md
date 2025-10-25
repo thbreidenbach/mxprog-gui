@@ -1,4 +1,4 @@
-# Requirement:
+# Dependencies:
 
 CMake ≥ 3.21
 C++17-Compiler (GCC ≥ 9 oder Clang ≥ 10)
