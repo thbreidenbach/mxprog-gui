@@ -12,6 +12,8 @@ sudo apt update
 sudo apt install -y 
 build-essential cmake ninja-build qt6-base-dev qt6-base-dev-tools qt6-serialport-dev
 
+(For wsl usbipd is needed for USB discovery, see https://learn.microsoft.com/en-us/windows/wsl/connect-usb)
+
 # Fedora:
 
 sudo dnf install -y gcc-c++ cmake ninja-build qt6-qtbase-devel qt6-qtserialport-devel
