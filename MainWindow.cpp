@@ -277,7 +277,7 @@ void MainWindow::onProcError(QProcess::ProcessError e) {
     default:                      why = "UnknownError"; break;
     }
     m_log->appendPlainText("QProcess error: " + why + (m_proc ? " — " + m_proc->errorString() : ""));
-    // Weiter zur nächsten Queue-Aufgabe (oder hier abbrechen, wenn gewünscht)
+    // Weiter zur nächsten Queue-Aufgabe (oder hier abbrechen)
     m_running = false;
     runNext();
 }
@@ -328,7 +328,7 @@ void MainWindow::runNext() {
     const QString prog = mxprogPath();
     if (c.log) m_log->appendPlainText("$ " + prog + " " + c.args.join(' '));
 
-    // PATH ergänzen (hilft, falls nur "mxprog" ohne absoluter Pfad)
+    // PATH ergänzen 
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
 #ifdef Q_OS_MAC
     {
@@ -383,7 +383,7 @@ void MainWindow::writeSlot(int bank, const QByteArray& img512k) {
     f.write(img512k);
     f.close();
 
-    // Beispiel-Timeouts (anpassen an dein Setup)
+    // Beispiel-Timeouts / Passt bei mir
     const int tEraseMs  =  90'000;
     const int tWriteMs  = 240'000;
     const int tVerifyMs = 120'000;
@@ -432,7 +432,7 @@ void MainWindow::writeAllMonolithic() {
         }
     }
 
-    // Beispiel-Timeouts (anpassen)
+    // Beispiel-Timeouts s.o
     const int tEraseMs  = 120'000;
     const int tWriteMs  = 300'000;
     const int tVerifyMs = 180'000;
@@ -440,7 +440,7 @@ void MainWindow::writeAllMonolithic() {
     if (m_chkErase->isChecked()) {
         enqueue(QStringList() << "-y" << "-e", "erase", true, tEraseMs);
     }
-    // ohne -b (ab Adresse 0). Falls dein mxprog explizit -a 0 will: hier ergänzen.
+    // ohne -b (Alle Bänke ab Adresse 0)
     enqueue(QStringList() << "-w" << path, "write-all", true, tWriteMs);
     if (m_chkVerify->isChecked()) {
         enqueue(QStringList() << "-v" << path, "verify-all", true, tVerifyMs);
