@@ -253,6 +253,12 @@ QVector<ComponentInfo> extractComponents(const QByteArray& canonicalRom, QString
         auto fallback = bestScan(swapped);
         if (!fallback.isEmpty()) {
             if (warnings) warnings->push_back("RomTag scan only matched after word-swap fallback.");
+
+            // Important: always export canonical byte order component payloads.
+            for (auto& c : fallback) {
+                c.data = canonicalRom.mid(c.offset, c.size);
+                c.checksumSha256 = QCryptographicHash::hash(c.data, QCryptographicHash::Sha256);
+            }
             out = std::move(fallback);
         }
     }
