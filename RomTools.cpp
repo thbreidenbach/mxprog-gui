@@ -20,6 +20,16 @@ quint32 readBe32(const QByteArray& data, int offset) {
     return (quint32(p[0]) << 24) | (quint32(p[1]) << 16) | (quint32(p[2]) << 8) | quint32(p[3]);
 }
 
+quint16 readBe16(const QByteArray& data, int offset) {
+    if (offset < 0 || offset + 2 > data.size()) return 0;
+    const auto* p = reinterpret_cast<const unsigned char*>(data.constData() + offset);
+    return (quint16(p[0]) << 8) | quint16(p[1]);
+}
+
+bool isPrintableAscii(unsigned char c) {
+    return c >= 0x20 && c <= 0x7e;
+}
+
 QString readCStringAtAddress(const QByteArray& rom, quint32 addr, quint32 baseAddr) {
     if (addr < baseAddr) return {};
     const int start = int(addr - baseAddr);
@@ -29,10 +39,11 @@ QString readCStringAtAddress(const QByteArray& rom, quint32 addr, quint32 baseAd
     for (int i = start; i < rom.size(); ++i) {
         const unsigned char c = static_cast<unsigned char>(rom[i]);
         if (c == 0) break;
-        if (c < 0x20 || c > 0x7e) return {};
+        if (!isPrintableAscii(c)) return {};
         out.append(char(c));
-        if (out.size() > 96) break;
+        if (out.size() > 128) break;
     }
+    if (out.isEmpty()) return {};
     return QString::fromLatin1(out);
 }
 
@@ -51,11 +62,108 @@ QString safeFileName(QString s) {
     return s;
 }
 
-quint32 detectBaseAddress(int sizeBytes) {
-    // Typical Kickstart ROM mapping: top of 24-bit address space.
-    // This heuristic allows 256/512/1024/2048 KiB dumps.
+quint32 detectBaseAddressBySize(int sizeBytes) {
     const quint32 top = 0x01000000;
     return top - quint32(sizeBytes);
+}
+
+quint32 normalizeAddress(quint32 addr, quint32 baseAddr, int romSize) {
+    const quint32 end = baseAddr + quint32(romSize);
+    if (addr >= baseAddr && addr < end) return addr;
+
+    // Some dumps carry upper bits outside 24-bit address space.
+    const quint32 masked24 = addr & 0x00FFFFFFu;
+    if (masked24 >= baseAddr && masked24 < end) return masked24;
+
+    return 0;
+}
+
+QVector<quint32> baseCandidates(const QByteArray& rom) {
+    QVector<quint32> out;
+    out.push_back(detectBaseAddressBySize(rom.size()));
+
+    // Heuristic from initial PC vector.
+    if (rom.size() >= 8) {
+        quint32 pc = readBe32(rom, 4) & 0x00FFFFFFu;
+        int size = rom.size();
+        if (size > 0 && (size & (size - 1)) == 0) {
+            quint32 mask = quint32(size - 1);
+            quint32 byPc = pc & ~mask;
+            if (byPc < 0x01000000u) out.push_back(byPc);
+        }
+    }
+
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+QVector<ComponentInfo> scanComponentsWithBase(const QByteArray& rom, quint32 baseAddr) {
+    QVector<ComponentInfo> out;
+
+    for (int i = 0; i + 26 <= rom.size(); ++i) {
+        if (readBe16(rom, i) != 0x4AFC) continue;
+
+        const quint32 matchTagRaw = readBe32(rom, i + 2);
+        const quint32 namePtrRaw = readBe32(rom, i + 14);
+
+        const quint32 matchTag = normalizeAddress(matchTagRaw, baseAddr, rom.size());
+        const quint32 namePtr = normalizeAddress(namePtrRaw, baseAddr, rom.size());
+        if (!matchTag || !namePtr) continue;
+
+        const int expected = int(matchTag - baseAddr);
+        if (std::abs(expected - i) > 32) continue;
+
+        const QString name = readCStringAtAddress(rom, namePtr, baseAddr);
+        if (name.isEmpty()) continue;
+
+        ComponentInfo c;
+        c.name = name;
+        c.offset = i;
+        c.size = 0; // assigned after sort
+        out.push_back(std::move(c));
+    }
+
+    std::sort(out.begin(), out.end(), [](const ComponentInfo& a, const ComponentInfo& b) {
+        return a.offset < b.offset;
+    });
+
+    // Deduplicate by offset
+    QVector<ComponentInfo> dedup;
+    for (const auto& c : out) {
+        if (!dedup.isEmpty() && dedup.back().offset == c.offset) continue;
+        dedup.push_back(c);
+    }
+
+    for (int idx = 0; idx < dedup.size(); ++idx) {
+        const int start = dedup[idx].offset;
+        const int end = (idx + 1 < dedup.size()) ? dedup[idx + 1].offset : rom.size();
+        if (end <= start) {
+            dedup[idx].size = 0;
+            dedup[idx].data.clear();
+            dedup[idx].checksumSha256.clear();
+            continue;
+        }
+        dedup[idx].size = end - start;
+        dedup[idx].data = rom.mid(start, dedup[idx].size);
+        dedup[idx].checksumSha256 = QCryptographicHash::hash(dedup[idx].data, QCryptographicHash::Sha256);
+    }
+
+    QVector<ComponentInfo> finalOut;
+    for (auto& c : dedup) {
+        if (c.size > 0) finalOut.push_back(std::move(c));
+    }
+    return finalOut;
+}
+
+QVector<ComponentInfo> bestScan(const QByteArray& rom) {
+    QVector<ComponentInfo> best;
+    const auto bases = baseCandidates(rom);
+    for (quint32 base : bases) {
+        auto curr = scanComponentsWithBase(rom, base);
+        if (curr.size() > best.size()) best = std::move(curr);
+    }
+    return best;
 }
 
 } // namespace
@@ -137,59 +245,20 @@ QVector<ComponentInfo> extractComponents(const QByteArray& canonicalRom, QString
     QVector<ComponentInfo> out;
     if (canonicalRom.isEmpty()) return out;
 
-    const quint32 baseAddr = detectBaseAddress(canonicalRom.size());
+    out = bestScan(canonicalRom);
 
-    struct Candidate {
-        int offset;
-        QString name;
-    };
-    QVector<Candidate> tags;
-
-    for (int i = 0; i + 26 <= canonicalRom.size(); ++i) {
-        const unsigned char b0 = static_cast<unsigned char>(canonicalRom[i]);
-        const unsigned char b1 = static_cast<unsigned char>(canonicalRom[i + 1]);
-        if (b0 != 0x4a || b1 != 0xfc) continue;
-
-        const quint32 matchTag = readBe32(canonicalRom, i + 2);
-        const quint32 namePtr = readBe32(canonicalRom, i + 14);
-
-        if (matchTag < baseAddr || matchTag >= baseAddr + quint32(canonicalRom.size())) continue;
-        const int expect = int(matchTag - baseAddr);
-        if (std::abs(expect - i) > 8) continue;
-
-        const QString name = readCStringAtAddress(canonicalRom, namePtr, baseAddr);
-        if (name.isEmpty()) continue;
-
-        bool duplicate = false;
-        for (const auto& t : tags) {
-            if (t.offset == i) {
-                duplicate = true;
-                break;
-            }
+    // Fallback: if input endian assumption is wrong, scanning swapped view may recover components.
+    if (out.isEmpty()) {
+        const QByteArray swapped = swap16(canonicalRom);
+        auto fallback = bestScan(swapped);
+        if (!fallback.isEmpty()) {
+            if (warnings) warnings->push_back("RomTag scan only matched after word-swap fallback.");
+            out = std::move(fallback);
         }
-        if (!duplicate) tags.push_back({i, name});
-    }
-
-    std::sort(tags.begin(), tags.end(), [](const Candidate& a, const Candidate& b) {
-        return a.offset < b.offset;
-    });
-
-    for (int idx = 0; idx < tags.size(); ++idx) {
-        const int start = tags[idx].offset;
-        const int end = (idx + 1 < tags.size()) ? tags[idx + 1].offset : canonicalRom.size();
-        if (end <= start) continue;
-
-        ComponentInfo c;
-        c.name = tags[idx].name;
-        c.offset = start;
-        c.size = end - start;
-        c.data = canonicalRom.mid(start, c.size);
-        c.checksumSha256 = QCryptographicHash::hash(c.data, QCryptographicHash::Sha256);
-        out.push_back(std::move(c));
     }
 
     if (warnings && out.isEmpty()) {
-        warnings->push_back("No ROM components detected via RomTag scan (Romsplit-compatible tagging not found).");
+        warnings->push_back("No ROM components detected via RomTag scan (Romsplit-compatible tagging not found). It may be a plain monolithic image without resident tags.");
     }
 
     return out;
