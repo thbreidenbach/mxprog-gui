@@ -84,23 +84,29 @@ QByteArray BankWidget::swap16(const QByteArray& in) {
 }
 
 QByteArray BankWidget::buildTiled512k() const {
-    QByteArray base;
-    for (auto& p : m_parts) base.append(p.data);
+    QByteArray out;
+    out.reserve(SLOT_SIZE);
+    for (const auto& p : m_parts) out.append(p.data);
 
-    if (base.isEmpty()) {
-        return QByteArray(SLOT_SIZE, char(0xff)); // leer -> 0xFF
+    if (out.size() < SLOT_SIZE) {
+        out.append(QByteArray(SLOT_SIZE - out.size(), char(0xff)));
     }
-    if (base.size() > SLOT_SIZE) {
-        return base.left(SLOT_SIZE);
-    }
-    if (base.size() == SLOT_SIZE) return base;
+    return out.left(SLOT_SIZE);
+}
 
-    int repeats  = SLOT_SIZE / base.size();
-    int rem      = SLOT_SIZE % base.size();
-    QByteArray out; out.reserve(SLOT_SIZE);
-    for (int i=0; i<repeats; ++i) out.append(base);
-    if (rem) out.append(base.constData(), rem);
-    return out;
+
+void BankWidget::loadSinglePart(const QString& name, const QByteArray& data, bool swapped) {
+    m_parts.clear();
+
+    RomPart part;
+    part.name = name + (swapped ? " [swap16]" : "");
+    part.data = data.left(SLOT_SIZE);
+    part.swapped = swapped;
+    m_parts.push_back(std::move(part));
+
+    refreshUi();
+    emit log(QString("Loaded into Slot %1: %2 (%3 KiB)")
+             .arg(m_bank).arg(part.name).arg(part.data.size()/1024));
 }
 
 void BankWidget::clear() {

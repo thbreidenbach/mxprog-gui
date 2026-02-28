@@ -33,8 +33,9 @@ public:
 
     int bank() const { return m_bank; }
     int usedBytes() const;
-    QByteArray buildTiled512k() const;   // Kachelt bis exakt 512 KiB; leer -> 0xFF
+    QByteArray buildTiled512k() const;   // Füllt bis exakt 512 KiB mit 0xFF; leer -> 0xFF
     void clear();
+    void loadSinglePart(const QString& name, const QByteArray& data, bool swapped = false);
 
 signals:
     void requestWriteSlot(int bank, const QByteArray& img512k);

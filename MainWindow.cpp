@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "RomTools.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -8,6 +9,7 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QtSerialPort/QSerialPortInfo>
 #include <QMessageBox>
 #include <QProcessEnvironment>
@@ -92,6 +94,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* actions = new QHBoxLayout();
     auto* btnWriteAll = new QPushButton("Write All (monolithic)", this);
     auto* btnSaveAll  = new QPushButton("Save 2 MiB Buffer…", this);
+    auto* btnImportRom = new QPushButton("Import/Split ROM…", this);
+    actions->addWidget(btnImportRom);
     actions->addWidget(btnSaveAll);
     actions->addStretch();
     actions->addWidget(btnWriteAll);
@@ -99,6 +103,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(btnWriteAll, &QPushButton::clicked, this, &MainWindow::writeAllMonolithic);
     connect(btnSaveAll,  &QPushButton::clicked, this, &MainWindow::saveMonolithic);
+    connect(btnImportRom,&QPushButton::clicked, this, &MainWindow::importRomAndCatalog);
 
     // Device actions
     auto* devBox = new QHBoxLayout();
@@ -476,3 +481,47 @@ void MainWindow::readDump() {
     enqueue(QStringList() << "-r" << path << "-l" << QString::number(TOTAL_BYTES), "read", true, 240'000);
 }
 void MainWindow::terminal()  { enqueue(QStringList() << "-t", "term", true, 0); /* kein Timeout im Terminal */ }
+
+
+void MainWindow::importRomAndCatalog() {
+    const QString source = QFileDialog::getOpenFileName(this, "Import ROM", QString(),
+        "ROM/Binary (*.bin *.rom);;All (*.*)");
+    if (source.isEmpty()) return;
+
+    auto meta = RomTools::inspectRom(source);
+    if (!meta.validSize) {
+        QMessageBox::warning(this, "Invalid ROM",
+                             QString("The selected ROM is invalid.\n%1")
+                                 .arg(meta.warnings.join("\n")));
+        m_log->appendPlainText("Import rejected: " + source);
+        return;
+    }
+
+    const auto slices = RomTools::splitIntoBanks(meta.padded2MiB);
+    if (slices.size() != 4) {
+        QMessageBox::warning(this, "Split failed", "Could not split ROM into 4 banks.");
+        return;
+    }
+
+    const QString baseName = QFileInfo(source).completeBaseName();
+    const QString defDir = QDir(QFileInfo(source).absolutePath()).filePath(baseName + "_catalog");
+    const QString outDir = QFileDialog::getExistingDirectory(this, "Select output folder for ROM catalog", defDir);
+    if (outDir.isEmpty()) return;
+
+    QString error;
+    if (!RomTools::writeCatalog(outDir, meta, slices, &error)) {
+        QMessageBox::critical(this, "Catalog write failed", error);
+        return;
+    }
+
+    for (int i = 0; i < m_banks.size() && i < slices.size(); ++i) {
+        m_banks[i]->loadSinglePart(QString("%1/%2").arg(baseName, slices[i].fileName), slices[i].data, false);
+    }
+
+    m_log->appendPlainText(QString("Imported ROM: %1").arg(source));
+    m_log->appendPlainText(QString("SHA256 (2MiB): %1").arg(QString::fromLatin1(RomTools::toHex(meta.checksumSha256))));
+    for (const auto& warning : meta.warnings) {
+        m_log->appendPlainText("Sanity: " + warning);
+    }
+    m_log->appendPlainText("Catalog stored in: " + outDir);
+}

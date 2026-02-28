@@ -15,6 +15,7 @@ add_executable(mxprog_qt
     main.cpp
     MainWindow.h MainWindow.cpp
     BankWidget.h BankWidget.cpp
+    RomTools.h RomTools.cpp
 )
 
 target_link_libraries(mxprog_qt PRIVATE

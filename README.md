@@ -3,11 +3,13 @@ This is a GUI for https://github.com/cdhooper/mx29f1615_programmer, a hardware/s
 
 Those flash can be utilized in Amiga Computers and can easily hold 4 different Amiga ROM Images typically provided as .bin binaries.
 
-The GUI allows for either .rom or .bin files which are correctly byte swapped given a .rom file. Files smaller 512kB are concatenated to fill the corresponding bank.
+The GUI allows for either .rom or .bin files which are correctly byte swapped given a .rom file. Files smaller 512kB are padded with 0xFF to fill the corresponding bank.
 
 Empty Banks are filled with ff.
 
 Each programming step saves the current buffer with a timestamp. Images can also be read from a flash and saved to disk.
+
+A new **Import/Split ROM** action can inspect a ROM, run sanity checks (including 2 MiB normalization/padding), compute SHA256 checksums, split it into 4 bank files, and write a catalog (`catalog.json`) for later verification/reassembly workflows.
 
 The GUI includes most or all functions available in command line.
 
