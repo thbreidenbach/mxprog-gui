@@ -520,15 +520,12 @@ void MainWindow::importRomAndCatalog() {
         return;
     }
 
-    for (int i = 0; i < m_banks.size() && i < slices.size(); ++i) {
-        m_banks[i]->loadSinglePart(QString("%1/%2").arg(baseName, slices[i].fileName), slices[i].data, false);
-    }
-
-    m_log->appendPlainText(QString("Imported ROM: %1").arg(source));
+    m_log->appendPlainText(QString("Analyzed ROM: %1").arg(source));
     m_log->appendPlainText(QString("SHA256 (2MiB): %1").arg(QString::fromLatin1(RomTools::toHex(meta.checksumSha256))));
     for (const auto& warning : meta.warnings) {
         m_log->appendPlainText("Sanity: " + warning);
     }
     m_log->appendPlainText(QString("Detected ROM components: %1").arg(components.size()));
     m_log->appendPlainText("Catalog stored in: " + outDir);
+    m_log->appendPlainText("Note: Banks were not modified by ROM analysis.");
 }

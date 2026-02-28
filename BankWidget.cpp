@@ -83,6 +83,29 @@ QByteArray BankWidget::swap16(const QByteArray& in) {
     return out;
 }
 
+
+
+bool BankWidget::shouldAutoSwap(const QFileInfo& fi) {
+    const QString ext = fi.suffix().toLower();
+    const QString fileName = fi.fileName().toLower();
+
+    if (ext == "rom") return true;
+
+    // Catalog components are expected to be canonical ROM byte order already.
+    if (ext == "library" || ext == "device" || ext.isEmpty()) return false;
+
+    // Naming-based opt-in for manually provided swapped inputs.
+    if (fileName.contains("byteswap") ||
+        fileName.contains("swapped") ||
+        fileName.contains("_swap") ||
+        fileName.contains(".swap." ) ||
+        fileName.endsWith(".swap")) {
+        return true;
+    }
+
+    return false;
+}
+
 QByteArray BankWidget::buildTiled512k() const {
     QByteArray out;
     out.reserve(SLOT_SIZE);
@@ -118,7 +141,7 @@ void BankWidget::clear() {
 void BankWidget::addFiles() {
     QStringList files = QFileDialog::getOpenFileNames(this,
         QString("Add ROM(s) to Slot %1").arg(m_bank),
-        QString(), "ROM/Binary (*.bin *.rom);;Binary (*.bin);;Amiga ROM (*.rom);;All (*.*)");
+        QString(), "ROM/Parts (*.bin *.rom *.library *.device);;All (*.*)");
     if (files.isEmpty()) return;
 
     for (const QString& path : files) {
@@ -127,8 +150,8 @@ void BankWidget::addFiles() {
             QMessageBox::warning(this, "Open failed", fi.fileName()); continue;
         }
         QByteArray raw = f.readAll();
-        bool isRom = fi.suffix().compare("rom", Qt::CaseInsensitive) == 0;
-        QByteArray data = isRom ? swap16(raw) : raw;
+        const bool autoSwap = shouldAutoSwap(fi);
+        QByteArray data = autoSwap ? swap16(raw) : raw;
         if (data.size() > SLOT_SIZE) {
             QMessageBox::warning(this, "Too large",
                                  QString("%1 exceeds 512 KiB").arg(fi.fileName()));
@@ -140,12 +163,12 @@ void BankWidget::addFiles() {
             continue;
         }
         RomPart part;
-        part.name    = fi.fileName() + (isRom ? " [swap16]" : "");
+        part.name    = fi.fileName() + (autoSwap ? " [swap16]" : "");
         part.data    = data;
-        part.swapped = isRom;
+        part.swapped = autoSwap;
         m_parts.push_back(std::move(part));
         emit log(QString("Added to Slot %1: %2 (%3 KiB)")
-                 .arg(m_bank).arg(fi.fileName() + (isRom ? " [swap16]" : "")).arg(data.size()/1024));
+                 .arg(m_bank).arg(fi.fileName() + (autoSwap ? " [swap16]" : "")).arg(data.size()/1024));
     }
     refreshUi();
 }

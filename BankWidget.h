@@ -4,6 +4,7 @@
 #include <QByteArray>
 #include <QVector>
 #include <QPushButton>
+#include <QFileInfo>
 
 struct RomPart {
     QString     name;
@@ -48,6 +49,7 @@ public slots:
 
 private:
     static QByteArray swap16(const QByteArray& in);
+    static bool shouldAutoSwap(const QFileInfo& fi);
     void refreshUi();
 
     int m_bank;
