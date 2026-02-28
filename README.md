@@ -11,7 +11,7 @@ Each programming step saves the current buffer with a timestamp. Images can also
 
 A new **Import/Analyze ROM** action can inspect a ROM, run sanity checks (including 2 MiB normalization/padding), compute SHA256 checksums, split it into 4 bank files, and additionally try to extract Kickstart-style functional components (RomTag scan, e.g. `exec.library`) into a `components/` folder plus `catalog.json` for verification/reassembly workflows.
 
-ROM analysis/cataloging does **not** auto-populate GUI banks. Extracted component files are saved as `.bin` in canonical (non-swapped) byte order. For manual bank composition, byte-swap is applied on-the-fly for `.rom` (and optional filename markers like `*_swap*`/`*swapped*`), while `.library`, `.device` and extensionless component files are kept as-is.
+ROM analysis/cataloging does **not** auto-populate GUI banks. Extracted component files are saved as `.bin` in canonical (non-swapped) byte order. For manual bank composition, `.bin` is kept as-is, while all non-`.bin` inputs (`.rom`, `.library`, `.device`, extensionless files, etc.) are byte-swapped on-the-fly before being placed in a bank.
 
 The GUI includes most or all functions available in command line.
 

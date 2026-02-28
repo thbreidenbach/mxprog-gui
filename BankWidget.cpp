@@ -87,23 +87,13 @@ QByteArray BankWidget::swap16(const QByteArray& in) {
 
 bool BankWidget::shouldAutoSwap(const QFileInfo& fi) {
     const QString ext = fi.suffix().toLower();
-    const QString fileName = fi.fileName().toLower();
 
-    if (ext == "rom") return true;
+    // Explicit .bin payloads are treated as already canonical/programmer-ready.
+    if (ext == "bin") return false;
 
-    // Catalog components are expected to be canonical ROM byte order already.
-    if (ext == "library" || ext == "device" || ext.isEmpty()) return false;
-
-    // Naming-based opt-in for manually provided swapped inputs.
-    if (fileName.contains("byteswap") ||
-        fileName.contains("swapped") ||
-        fileName.contains("_swap") ||
-        fileName.contains(".swap." ) ||
-        fileName.endsWith(".swap")) {
-        return true;
-    }
-
-    return false;
+    // Everything else (e.g. .rom, .library, .device, extensionless components)
+    // is auto-swapped for flash/programmer byte ordering.
+    return true;
 }
 
 QByteArray BankWidget::buildTiled512k() const {
