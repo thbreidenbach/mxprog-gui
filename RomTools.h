@@ -29,10 +29,23 @@ struct SliceInfo {
     QByteArray checksumSha256;
 };
 
+struct ComponentInfo {
+    QString name;
+    int offset = 0;
+    int size = 0;
+    QByteArray data;
+    QByteArray checksumSha256;
+};
+
 QByteArray swap16(const QByteArray& in);
 QByteArray toHex(const QByteArray& bytes);
 RomMeta inspectRom(const QString& path);
 QVector<SliceInfo> splitIntoBanks(const QByteArray& twoMiB);
-bool writeCatalog(const QString& outDir, const RomMeta& meta, const QVector<SliceInfo>& slices, QString* error);
+QVector<ComponentInfo> extractComponents(const QByteArray& canonicalRom, QStringList* warnings = nullptr);
+bool writeCatalog(const QString& outDir,
+                  const RomMeta& meta,
+                  const QVector<SliceInfo>& slices,
+                  const QVector<ComponentInfo>& components,
+                  QString* error);
 
 } // namespace RomTools

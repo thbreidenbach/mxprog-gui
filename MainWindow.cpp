@@ -94,7 +94,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* actions = new QHBoxLayout();
     auto* btnWriteAll = new QPushButton("Write All (monolithic)", this);
     auto* btnSaveAll  = new QPushButton("Save 2 MiB Buffer…", this);
-    auto* btnImportRom = new QPushButton("Import/Split ROM…", this);
+    auto* btnImportRom = new QPushButton("Import/Analyze ROM…", this);
     actions->addWidget(btnImportRom);
     actions->addWidget(btnSaveAll);
     actions->addStretch();
@@ -503,13 +503,19 @@ void MainWindow::importRomAndCatalog() {
         return;
     }
 
+    QStringList componentWarnings;
+    const auto components = RomTools::extractComponents(meta.canonicalData, &componentWarnings);
+    for (const auto& w : componentWarnings) {
+        meta.warnings << w;
+    }
+
     const QString baseName = QFileInfo(source).completeBaseName();
     const QString defDir = QDir(QFileInfo(source).absolutePath()).filePath(baseName + "_catalog");
     const QString outDir = QFileDialog::getExistingDirectory(this, "Select output folder for ROM catalog", defDir);
     if (outDir.isEmpty()) return;
 
     QString error;
-    if (!RomTools::writeCatalog(outDir, meta, slices, &error)) {
+    if (!RomTools::writeCatalog(outDir, meta, slices, components, &error)) {
         QMessageBox::critical(this, "Catalog write failed", error);
         return;
     }
@@ -523,5 +529,6 @@ void MainWindow::importRomAndCatalog() {
     for (const auto& warning : meta.warnings) {
         m_log->appendPlainText("Sanity: " + warning);
     }
+    m_log->appendPlainText(QString("Detected ROM components: %1").arg(components.size()));
     m_log->appendPlainText("Catalog stored in: " + outDir);
 }
