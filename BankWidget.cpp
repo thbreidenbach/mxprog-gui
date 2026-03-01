@@ -166,6 +166,8 @@ bool BankWidget::looksLikeKickstartHeader(const QByteArray& image, int effective
 void BankWidget::finalizeKickstartChecksum(QByteArray& image, int effectiveSize) {
     if (effectiveSize <= 0 || effectiveSize > image.size() || (effectiveSize % 4) != 0) return;
 
+    // Henne-Ei safe: checksum slot is treated as 0 during summation,
+    // then filled with the additive inverse so global sum becomes 0xFFFFFFFF.
     const int checksumOff = effectiveSize - 4;
     writeBe32(image, checksumOff, 0);
 
@@ -211,9 +213,7 @@ QByteArray BankWidget::buildTiled512k() const {
     }
 
     QByteArray out = base.left(SLOT_SIZE);
-    if (looksLikeKickstartHeader(out, SLOT_SIZE)) {
-        finalizeKickstartChecksum(out, SLOT_SIZE);
-    }
+    finalizeKickstartChecksum(out, SLOT_SIZE);
     return out;
 }
 
@@ -292,8 +292,20 @@ void BankWidget::removeSelected() {
 }
 
 void BankWidget::doWriteSlot() {
+    if (!hasRomHeaderPart()) {
+        emit log(QString("Slot %1 notice: no __rom_header part detected. Header/vectors may be incomplete for modified Kickstart ROMs.")
+                 .arg(m_bank));
+    }
+
     QByteArray img = buildTiled512k();
     emit requestWriteSlot(m_bank, img);
+}
+
+bool BankWidget::hasRomHeaderPart() const {
+    for (const auto& p : m_parts) {
+        if (p.name.contains("__rom_header", Qt::CaseInsensitive)) return true;
+    }
+    return false;
 }
 
 void BankWidget::refreshUi() {

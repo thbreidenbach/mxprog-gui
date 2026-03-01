@@ -55,6 +55,7 @@ private:
     static void writeBe32(QByteArray& out, int off, quint32 v);
     static void finalizeKickstartChecksum(QByteArray& image, int effectiveSize);
     static bool looksLikeKickstartHeader(const QByteArray& image, int effectiveSize);
+    bool hasRomHeaderPart() const;
     void refreshUi();
 
     int m_bank;
