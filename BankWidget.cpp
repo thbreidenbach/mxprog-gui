@@ -20,21 +20,59 @@ void MeterBar::setTotal(int total) {
 
 void MeterBar::paintEvent(QPaintEvent*) {
     QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, false);
     p.fillRect(rect(), Qt::white);
-    p.setPen(Qt::black);
 
-    int W = width();
-    int H = height();
+    const int W = width();
+    const int H = height();
+    const int total = qMax(1, m_total);
+    const int halfBytes = total / 2;
+    const int xMid = W / 2;
+
+    // Base fill: actually loaded bytes (linear from offset 0).
     int x = 0;
+    int consumed = 0;
     for (int i = 0; i < m_sizes.size(); ++i) {
-        double frac = double(m_sizes[i]) / double(m_total);
-        int w = qMax(1, int(W * frac));
-        QColor color = (i % 2 == 0) ? QColor("#3b82f6") : QColor("#10b981");
-        p.fillRect(QRect(x,0,w,H), color);
-        p.drawRect(QRect(x,0,w,H));
-        x += w;
+        const int segBytes = qBound(0, m_sizes[i], total - consumed);
+        if (segBytes <= 0) continue;
+
+        const int xNext = qBound(0, int((qint64(consumed + segBytes) * W) / total), W);
+        const int w = qMax(1, xNext - x);
+        const QColor color = (i % 2 == 0) ? QColor("#3b82f6") : QColor("#10b981");
+        p.fillRect(QRect(x, 0, w, H), color);
+        p.setPen(Qt::black);
+        p.drawRect(QRect(x, 0, w, H));
+
+        consumed += segBytes;
+        x = xNext;
+        if (consumed >= total) break;
     }
-    p.drawRect(rect().adjusted(0,0,-1,-1));
+
+    // Middle marker at 256 KiB.
+    p.setPen(QPen(QColor("#111827"), 2));
+    p.drawLine(xMid, 0, xMid, H - 1);
+
+    // Visual mode hints:
+    // - <=256 KiB: mirrored area in upper half of bank is highlighted.
+    // - >256 KiB: overflow area (256..used) is hatched as warning.
+    if (consumed > 0 && consumed <= halfBytes) {
+        const int mirrorEnd = qBound(xMid, int((qint64(halfBytes + consumed) * W) / total), W);
+        const int mirrorW = qMax(0, mirrorEnd - xMid);
+        if (mirrorW > 0) {
+            QBrush mirrorBrush(QColor(59, 130, 246, 70), Qt::Dense6Pattern);
+            p.fillRect(QRect(xMid, 0, mirrorW, H), mirrorBrush);
+        }
+    } else if (consumed > halfBytes) {
+        const int overflowEnd = qBound(xMid, int((qint64(consumed) * W) / total), W);
+        const int overflowW = qMax(0, overflowEnd - xMid);
+        if (overflowW > 0) {
+            QBrush warnBrush(QColor(220, 38, 38, 90), Qt::BDiagPattern);
+            p.fillRect(QRect(xMid, 0, overflowW, H), warnBrush);
+        }
+    }
+
+    p.setPen(Qt::black);
+    p.drawRect(rect().adjusted(0, 0, -1, -1));
 }
 
 // ---------------- BankWidget ----------------
@@ -173,13 +211,22 @@ void BankWidget::addFiles() {
                 QString("Adding %1 would exceed 512 KiB in Slot %2").arg(fi.fileName()).arg(m_bank));
             continue;
         }
+        const int beforeBytes = usedBytes();
+
         RomPart part;
         part.name    = fi.fileName() + (autoSwap ? " [swap16]" : "");
         part.data    = data;
         part.swapped = autoSwap;
         m_parts.push_back(std::move(part));
+
         emit log(QString("Added to Slot %1: %2 (%3 KiB)")
                  .arg(m_bank).arg(fi.fileName() + (autoSwap ? " [swap16]" : "")).arg(data.size()/1024));
+
+        const int halfBank = SLOT_SIZE / 2;
+        if (beforeBytes <= halfBank && usedBytes() > halfBank) {
+            emit log(QString("Slot %1 warning: payload exceeds 256 KiB; 256..512 KiB region is now linear (hatched in meter).")
+                     .arg(m_bank));
+        }
     }
     refreshUi();
 }
@@ -212,4 +259,14 @@ void BankWidget::refreshUi() {
         seg.push_back(p.data.size());
     }
     m_meter->setSegments(seg);
+
+    const int used = usedBytes();
+    const int halfBank = SLOT_SIZE / 2;
+    if (used <= halfBank) {
+        m_meter->setToolTip(QString("Slot %1: %2/%3 KiB (mirrored from 256 to 512 KiB)")
+                            .arg(m_bank).arg(used/1024).arg(SLOT_SIZE/1024));
+    } else {
+        m_meter->setToolTip(QString("Slot %1: %2/%3 KiB (above 256 KiB, linear layout in upper half)")
+                            .arg(m_bank).arg(used/1024).arg(SLOT_SIZE/1024));
+    }
 }
