@@ -233,6 +233,170 @@ void BankWidget::finalizeKickstartChecksum(QByteArray& image, int effectiveSize)
     writeBe32(image, checksumOff, checksum);
 }
 
+/* ---------------------------------------------------------------------------
+   relocateRomTags – patch absolute addresses inside Resident (RomTag)
+   structures so that a bank composed from individually extracted components
+   boots correctly even when modules are omitted or reordered.
+
+   Each RomTag carries several absolute ROM pointers that encode the
+   component's original position.  When a preceding component is removed the
+   remaining modules shift to lower offsets and every one of those pointers
+   becomes invalid.  The Amiga ROM scanner (exec/InitResident) rejects any
+   RomTag whose rt_MatchTag does not equal its own address, so shifted
+   modules are silently skipped – which is fatal for essential drivers.
+
+   This function scans the composed image for RomTag magic (0x4AFC), detects
+   mismatched self-pointers, and adjusts:
+
+     1. RomTag fields:  rt_MatchTag, rt_EndSkip, rt_Name, rt_IdString, rt_Init
+     2. RTF_AUTOINIT init-struct fields:  funcTable, dataInit, initFunc
+     3. Absolute function-table entries (if the table is not in relative mode)
+     4. Reset vector (Initial PC at offset +4) when the effective base changes
+
+   Returns the number of RomTags that were patched (0 when the image was
+   already consistent).
+   ----------------------------------------------------------------------- */
+int BankWidget::relocateRomTags(QByteArray& image, int effectiveSize) {
+    if (effectiveSize <= 0 || image.size() < effectiveSize) return 0;
+    if ((effectiveSize % 2) != 0) return 0;
+
+    const quint32 baseAddr = 0x01000000u - quint32(effectiveSize);
+    const quint32 endAddr  = baseAddr + quint32(effectiveSize);
+
+    int patched = 0;
+
+    for (int off = 0; off + 26 <= effectiveSize; off += 2) {
+        if (readBe16(image, off) != 0x4AFC) continue;
+
+        const quint32 matchTag = readBe32(image, off + 2) & 0x00FFFFFFu;
+        const quint32 selfAddr = baseAddr + quint32(off);
+
+        if (matchTag == selfAddr) {          // already in place
+            off += 24;                       // skip past this RomTag structure
+            continue;
+        }
+
+        // matchTag must look like a Kickstart ROM address (0x00F80000..0x00FFFFFF)
+        if (matchTag < 0x00F80000u) continue;
+
+        const qint64 delta = qint64(selfAddr) - qint64(matchTag);
+
+        // Plausibility gate: after relocation rt_Name must point to printable ASCII.
+        const quint32 namePtr = readBe32(image, off + 14) & 0x00FFFFFFu;
+        if (namePtr != 0) {
+            quint32 newName = quint32(qint64(namePtr) + delta);
+            if (newName < baseAddr || newName >= endAddr) continue;
+            unsigned char c0 = static_cast<unsigned char>(image.at(int(newName - baseAddr)));
+            if (c0 < 0x20 || c0 > 0x7e) continue;   // not printable → false 0x4AFC hit
+        }
+
+        // ---- patch RomTag fields ----
+
+        // rt_MatchTag (+2) – self-pointer
+        writeBe32(image, off + 2, selfAddr);
+
+        // rt_EndSkip (+6) – scanner resume address; clamp into [self+26 .. endAddr]
+        {
+            quint32 es = readBe32(image, off + 6) & 0x00FFFFFFu;
+            if (es != 0) {
+                quint32 newEs = quint32(qint64(es) + delta);
+                if (newEs > endAddr) newEs = endAddr;
+                if (newEs <= selfAddr) newEs = selfAddr + 26;
+                writeBe32(image, off + 6, newEs);
+            }
+        }
+
+        // rt_Name (+14)
+        if (namePtr != 0)
+            writeBe32(image, off + 14, quint32(qint64(namePtr) + delta));
+
+        // rt_IdString (+18)
+        {
+            quint32 ids = readBe32(image, off + 18) & 0x00FFFFFFu;
+            if (ids != 0) {
+                quint32 newIds = quint32(qint64(ids) + delta);
+                if (newIds >= baseAddr && newIds < endAddr)
+                    writeBe32(image, off + 18, newIds);
+            }
+        }
+
+        // rt_Init (+22) – init function or AUTOINIT table pointer
+        quint32 newInitAddr = 0;
+        {
+            quint32 initVal = readBe32(image, off + 22) & 0x00FFFFFFu;
+            if (initVal != 0) {
+                newInitAddr = quint32(qint64(initVal) + delta);
+                if (newInitAddr >= baseAddr && newInitAddr < endAddr)
+                    writeBe32(image, off + 22, newInitAddr);
+                else
+                    newInitAddr = 0;
+            }
+        }
+
+        // ---- RTF_AUTOINIT: patch the init-struct pointed to by rt_Init ----
+        const quint8 flags = static_cast<quint8>(image.at(off + 10));
+        if ((flags & 0x80) && newInitAddr != 0) {
+            const int iso = int(newInitAddr - baseAddr);   // image offset of init struct
+            if (iso >= 0 && iso + 16 <= effectiveSize) {
+                // struct layout:  +0 dataSize | +4 funcTable | +8 dataInit | +12 initFunc
+                quint32 newFuncTab = 0;
+                const int fields[] = { 4, 8, 12 };
+                for (int f : fields) {
+                    quint32 ptr = readBe32(image, iso + f) & 0x00FFFFFFu;
+                    if (ptr == 0) continue;
+                    quint32 np = quint32(qint64(ptr) + delta);
+                    if (np >= baseAddr && np < endAddr) {
+                        writeBe32(image, iso + f, np);
+                        if (f == 4) newFuncTab = np;
+                    }
+                }
+
+                // If funcTable uses absolute pointers (first word != 0xFFFF),
+                // patch every 32-bit entry until the 0xFFFFFFFF terminator.
+                if (newFuncTab != 0) {
+                    int ftOff = int(newFuncTab - baseAddr);
+                    if (ftOff >= 0 && ftOff + 2 <= effectiveSize &&
+                        readBe16(image, ftOff) != 0xFFFF)
+                    {
+                        const int maxEntries = 256;  // reasonable upper bound
+                        for (int n = 0, e = ftOff; n < maxEntries && e + 4 <= effectiveSize; ++n, e += 4) {
+                            quint32 entry = readBe32(image, e);
+                            if (entry == 0xFFFFFFFFu) break;
+                            quint32 e24 = entry & 0x00FFFFFFu;
+                            if (e24 < 0x00F80000u) continue;   // not a ROM pointer
+                            quint32 ne = quint32(qint64(e24) + delta);
+                            if (ne >= baseAddr && ne < endAddr)
+                                writeBe32(image, e, ne);
+                        }
+                    }
+                }
+            }
+        }
+
+        ++patched;
+        off += 24;   // skip rest of RomTag; loop adds +2 → next check at off+26
+    }
+
+    // ---- Patch reset vector (Initial PC at offset +4) when base changed ----
+    if (patched > 0 && image.size() >= 8) {
+        const quint32 pc = readBe32(image, 4) & 0x00FFFFFFu;
+        if (pc >= 0x00F80000u && (pc < baseAddr || pc >= endAddr)) {
+            const quint32 trySizes[] = { 256u * 1024u, 512u * 1024u };
+            for (quint32 sz : trySizes) {
+                quint32 tryBase = 0x01000000u - sz;
+                if (pc >= tryBase && pc < tryBase + sz) {
+                    quint32 newPc = baseAddr + (pc - tryBase);
+                    if (newPc >= baseAddr && newPc < endAddr)
+                        writeBe32(image, 4, newPc);
+                    break;
+                }
+            }
+        }
+    }
+
+    return patched;
+}
+
 QByteArray BankWidget::buildTiled512k() const {
     QByteArray base;
     base.reserve(SLOT_SIZE);
@@ -251,6 +415,7 @@ QByteArray BankWidget::buildTiled512k() const {
         if (half.size() < HALF_BANK) {
             half.append(QByteArray(HALF_BANK - half.size(), char(0xff)));
         }
+        relocateRomTags(half, HALF_BANK);
         if (looksLikeKickstartHeader(half, HALF_BANK)) {
             finalizeKickstartChecksum(half, HALF_BANK);
         }
@@ -268,6 +433,7 @@ QByteArray BankWidget::buildTiled512k() const {
     }
 
     QByteArray out = base.left(SLOT_SIZE);
+    relocateRomTags(out, SLOT_SIZE);
     if (looksLikeKickstartHeader(out, SLOT_SIZE)) {
         finalizeKickstartChecksum(out, SLOT_SIZE);
     }
