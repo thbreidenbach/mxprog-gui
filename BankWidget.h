@@ -58,8 +58,12 @@ private:
     static void finalizeKickstartChecksum(QByteArray& image, int effectiveSize);
     static bool looksLikeKickstartHeader(const QByteArray& image, int effectiveSize);
     static QStringList validateRomTags(const QByteArray& image, int effectiveSize);
+    QStringList validatePartRomTags(int effectiveSize) const;
+    QStringList validatePartsForCurrentLayout() const;
+    bool ensureRomHeaderFirst();
     bool hasRomHeaderPart() const;
     void refreshUi();
+    void updateWriteButtonState();
 
     int m_bank;
     QListWidget* m_list;

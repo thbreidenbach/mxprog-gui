@@ -349,20 +349,84 @@ void BankWidget::removeSelected() {
 }
 
 void BankWidget::doWriteSlot() {
+    if (ensureRomHeaderFirst()) {
+        emit log(QString("Slot %1: moved __rom_header to first position before write.").arg(m_bank));
+        refreshUi();
+    }
+
+    const auto issues = validatePartsForCurrentLayout();
+    for (const auto& issue : issues) {
+        emit log(QString("Slot %1 preflight: %2").arg(m_bank).arg(issue));
+    }
+
     if (!hasRomHeaderPart()) {
         emit log(QString("Slot %1 notice: no __rom_header part detected. Header/vectors may be incomplete for modified Kickstart ROMs.")
                  .arg(m_bank));
     }
 
     QByteArray img = buildTiled512k();
+    emit requestWriteSlot(m_bank, img);
+}
+
+QStringList BankWidget::validatePartRomTags(int effectiveSize) const {
+    QStringList issues;
+    if (effectiveSize <= 0) return issues;
+
+    const quint32 baseAddr = 0x01000000u - quint32(effectiveSize);
+    int absOffset = 0;
+    for (const auto& part : m_parts) {
+        const int partStart = absOffset;
+        const QByteArray& data = part.data;
+        for (int off = 0; off + 26 <= data.size(); ++off) {
+            if (readBe16(data, off) != 0x4AFC) continue;
+            const quint32 matchTag = readBe32(data, off + 2) & 0x00FFFFFFu;
+            const quint32 expected = (baseAddr + quint32(partStart + off)) & 0x00FFFFFFu;
+            if (matchTag != expected) {
+                issues << QString("Part '%1': RomTag @+0x%2 has rt_MatchTag=0x%3 (expected 0x%4 after current placement)")
+                              .arg(part.name)
+                              .arg(off, 6, 16, QLatin1Char('0'))
+                              .arg(matchTag, 6, 16, QLatin1Char('0'))
+                              .arg(expected, 6, 16, QLatin1Char('0'));
+                if (issues.size() >= 16) {
+                    issues << "Further per-part RomTag issues suppressed.";
+                    return issues;
+                }
+            }
+        }
+        absOffset += part.data.size();
+    }
+    return issues;
+}
+
+QStringList BankWidget::validatePartsForCurrentLayout() const {
+    QStringList issues;
+    if (m_parts.isEmpty()) return issues;
+
     const int effectiveSize = (usedBytes() <= SLOT_SIZE / 2) ? SLOT_SIZE / 2 : SLOT_SIZE;
+    if (effectiveSize <= 0) return issues;
+
+    issues << validatePartRomTags(effectiveSize);
+
+    QByteArray img = buildTiled512k();
     if (looksLikeKickstartHeader(img, effectiveSize)) {
-        const auto issues = validateRomTags(img, effectiveSize);
-        for (const auto& issue : issues) {
-            emit log(QString("Slot %1 RomTag check: %2").arg(m_bank).arg(issue));
+        issues << validateRomTags(img, effectiveSize);
+        if (!hasRomHeaderPart()) {
+            issues << "No __rom_header part present; header/vectors may be incomplete.";
         }
     }
-    emit requestWriteSlot(m_bank, img);
+
+    return issues;
+}
+
+bool BankWidget::ensureRomHeaderFirst() {
+    for (int i = 0; i < m_parts.size(); ++i) {
+        if (!m_parts[i].name.contains("__rom_header", Qt::CaseInsensitive)) continue;
+        if (i == 0) return false;
+        RomPart header = m_parts.takeAt(i);
+        m_parts.prepend(std::move(header));
+        return true;
+    }
+    return false;
 }
 
 bool BankWidget::hasRomHeaderPart() const {
@@ -370,6 +434,19 @@ bool BankWidget::hasRomHeaderPart() const {
         if (p.name.contains("__rom_header", Qt::CaseInsensitive)) return true;
     }
     return false;
+}
+
+void BankWidget::updateWriteButtonState() {
+    const auto issues = validatePartsForCurrentLayout();
+    if (issues.isEmpty()) {
+        m_btnWrite->setToolTip(QString("Slot %1 preflight: no obvious issues detected.").arg(m_bank));
+        return;
+    }
+
+    m_btnWrite->setToolTip(QString("Slot %1 preflight warnings (%2):\n- %3")
+                           .arg(m_bank)
+                           .arg(issues.size())
+                           .arg(issues.join("\n- ")));
 }
 
 void BankWidget::refreshUi() {
@@ -396,4 +473,6 @@ void BankWidget::refreshUi() {
         m_meter->setToolTip(QString("Slot %1: %2/%3 KiB (above 256 KiB, linear layout in upper half)")
                             .arg(m_bank).arg(used/1024).arg(SLOT_SIZE/1024));
     }
+
+    updateWriteButtonState();
 }
