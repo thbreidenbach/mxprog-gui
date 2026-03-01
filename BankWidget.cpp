@@ -97,14 +97,35 @@ bool BankWidget::shouldAutoSwap(const QFileInfo& fi) {
 }
 
 QByteArray BankWidget::buildTiled512k() const {
-    QByteArray out;
-    out.reserve(SLOT_SIZE);
-    for (const auto& p : m_parts) out.append(p.data);
+    QByteArray base;
+    base.reserve(SLOT_SIZE);
+    for (const auto& p : m_parts) base.append(p.data);
 
-    if (out.size() < SLOT_SIZE) {
-        out.append(QByteArray(SLOT_SIZE - out.size(), char(0xff)));
+    if (base.isEmpty()) {
+        return QByteArray(SLOT_SIZE, char(0xff));
     }
-    return out.left(SLOT_SIZE);
+
+    static const int HALF_BANK = SLOT_SIZE / 2; // 256 KiB
+
+    // For <= 256 KiB payloads, build a 256 KiB image and mirror it to 512 KiB.
+    // This keeps classic 256 KiB ROM layout compatible in a 512 KiB bank.
+    if (base.size() <= HALF_BANK) {
+        QByteArray half = base.left(HALF_BANK);
+        if (half.size() < HALF_BANK) {
+            half.append(QByteArray(HALF_BANK - half.size(), char(0xff)));
+        }
+        QByteArray out;
+        out.reserve(SLOT_SIZE);
+        out.append(half);
+        out.append(half);
+        return out;
+    }
+
+    // > 256 KiB: keep linear layout and pad up to full 512 KiB bank.
+    if (base.size() < SLOT_SIZE) {
+        base.append(QByteArray(SLOT_SIZE - base.size(), char(0xff)));
+    }
+    return base.left(SLOT_SIZE);
 }
 
 

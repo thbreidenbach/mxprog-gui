@@ -34,7 +34,7 @@ public:
 
     int bank() const { return m_bank; }
     int usedBytes() const;
-    QByteArray buildTiled512k() const;   // Füllt bis exakt 512 KiB mit 0xFF; leer -> 0xFF
+    QByteArray buildTiled512k() const;   // <=256KiB: auf 256KiB auffüllen+spiegeln; >256KiB: auf 512KiB mit 0xFF
     void clear();
     void loadSinglePart(const QString& name, const QByteArray& data, bool swapped = false);
 
