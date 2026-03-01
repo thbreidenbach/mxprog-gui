@@ -12,6 +12,7 @@ struct RomPart {
     QString     name;
     QByteArray  data;   // ggf. bereits swap16-konvertiert
     bool        swapped = false;
+    quint32     originalAddr = 0; // original absolute ROM address (from rt_MatchTag), 0 = unknown/header
 };
 
 class MeterBar : public QWidget {
@@ -59,6 +60,7 @@ private:
     static bool looksLikeKickstartHeader(const QByteArray& image, int effectiveSize);
     static QStringList validateRomTags(const QByteArray& image, int effectiveSize);
     static int relocateRomTags(QByteArray& image, int effectiveSize);
+    static quint32 detectOriginalAddr(const QByteArray& data, const QString& name);
     QStringList validatePartRomTags(int effectiveSize) const;
     QStringList validatePartsForCurrentLayout() const;
     bool ensureRomHeaderFirst();

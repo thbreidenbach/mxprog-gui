@@ -6,6 +6,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QMessageBox>
+#include <cstring>
 
 MeterBar::MeterBar(QWidget* parent) : QWidget(parent) {
     setMinimumHeight(20);
@@ -219,18 +220,53 @@ QStringList BankWidget::validateRomTags(const QByteArray& image, int effectiveSi
 void BankWidget::finalizeKickstartChecksum(QByteArray& image, int effectiveSize) {
     if (effectiveSize <= 0 || effectiveSize > image.size() || (effectiveSize % 4) != 0) return;
 
-    // Henne-Ei safe: checksum slot is treated as 0 during summation,
-    // then filled with the additive inverse so global sum becomes 0xFFFFFFFF.
+    // Amiga Kickstart checksum: the carry-propagating (ones' complement)
+    // sum of all 32-bit big-endian longwords must equal 0xFFFFFFFF.
+    // This matches exec.library's SumKickData() which uses:
+    //   add.l (a0)+,d0 / bcc.s .noc / addq.l #1,d0
     const int checksumOff = effectiveSize - 4;
     writeBe32(image, checksumOff, 0);
 
-    quint64 sum = 0;
+    quint32 sum = 0;
     for (int off = 0; off < effectiveSize; off += 4) {
+        quint32 old = sum;
         sum += readBe32(image, off);
+        if (sum < old) ++sum;           // fold carry (ones' complement add)
     }
-    const quint32 partial = quint32(sum & 0xFFFFFFFFu);
-    const quint32 checksum = ~partial;   // ones' complement: partial + checksum == 0xFFFFFFFF
+    const quint32 checksum = ~sum;
     writeBe32(image, checksumOff, checksum);
+}
+
+/* ---------------------------------------------------------------------------
+   detectOriginalAddr – determine the original ROM address of a component.
+
+   For __rom_header parts the address equals the ROM base (detected later).
+   For normal components the first bytes are the RomTag (0x4AFC magic),
+   and rt_MatchTag (bytes 2-5) encodes the original absolute address.
+   Returns 0 for __rom_header parts (always placed at ROM base),
+   or the 24-bit rt_MatchTag value for regular components.
+   ----------------------------------------------------------------------- */
+quint32 BankWidget::detectOriginalAddr(const QByteArray& data, const QString& name) {
+    // __rom_header is always placed at offset 0 (= baseAddr).
+    if (name.contains("__rom_header", Qt::CaseInsensitive))
+        return 0;
+
+    // Regular component: RomTag should be at the very start.
+    if (data.size() >= 6 && readBe16(data, 0) == 0x4AFC) {
+        quint32 matchTag = readBe32(data, 2) & 0x00FFFFFFu;
+        if (matchTag >= 0x00F80000u && matchTag < 0x01000000u)
+            return matchTag;
+    }
+
+    // Fallback: scan first 64 bytes for a RomTag.
+    for (int off = 2; off + 6 <= qMin(data.size(), 64); off += 2) {
+        if (readBe16(data, off) != 0x4AFC) continue;
+        quint32 matchTag = readBe32(data, off + 2) & 0x00FFFFFFu;
+        if (matchTag >= 0x00F80000u && matchTag < 0x01000000u)
+            return matchTag;
+    }
+
+    return 0;   // unknown – will trigger concatenation fallback
 }
 
 /* ---------------------------------------------------------------------------
@@ -398,18 +434,85 @@ int BankWidget::relocateRomTags(QByteArray& image, int effectiveSize) {
 }
 
 QByteArray BankWidget::buildTiled512k() const {
-    QByteArray base;
-    base.reserve(SLOT_SIZE);
-    for (const auto& p : m_parts) base.append(p.data);
-
-    if (base.isEmpty()) {
+    if (m_parts.isEmpty()) {
         return QByteArray(SLOT_SIZE, char(0xff));
     }
 
     static const int HALF_BANK = SLOT_SIZE / 2; // 256 KiB
 
-    // For <= 256 KiB payloads, build a 256 KiB image and mirror it to 512 KiB.
-    // This keeps classic 256 KiB ROM layout compatible in a 512 KiB bank.
+    /* ------------------------------------------------------------------
+       Gap-filling strategy: if ALL loaded parts have a known original
+       ROM address (from their RomTag's rt_MatchTag), place each one at
+       its ORIGINAL offset inside the image.  Gaps left by omitted
+       components are filled with 0xFF.  This preserves every absolute
+       address in the 68000 machine code and is the only way to safely
+       drop individual modules from a Kickstart ROM.
+       ------------------------------------------------------------------ */
+    bool canGapFill = (m_parts.size() > 1);   // single-part = monolithic, no gap-fill needed
+    bool hasHeader = false;
+    quint32 addrMin = 0x01000000u;
+    quint32 addrMax = 0;
+
+    if (canGapFill) {
+        for (const auto& p : m_parts) {
+            if (p.name.contains("__rom_header", Qt::CaseInsensitive)) {
+                hasHeader = true;
+                continue;   // header is always at offset 0
+            }
+            if (p.originalAddr == 0) {
+                canGapFill = false;     // unknown address → fall back
+                break;
+            }
+            if (p.originalAddr < addrMin) addrMin = p.originalAddr;
+            quint32 end = p.originalAddr + quint32(p.data.size());
+            if (end > addrMax) addrMax = end;
+        }
+    }
+
+    if (canGapFill && addrMin >= 0x00F80000u && addrMax <= 0x01000000u) {
+        // Determine original ROM size / effective size from address range.
+        // If any address is below 0xFC0000, original ROM was 512 KiB.
+        const int effectiveSize = (addrMin < 0x00FC0000u) ? SLOT_SIZE : HALF_BANK;
+        const quint32 baseAddr = 0x01000000u - quint32(effectiveSize);
+
+        QByteArray image(effectiveSize, char(0xff));
+
+        // Place each part at its original ROM offset.
+        for (const auto& p : m_parts) {
+            int destOff;
+            if (p.name.contains("__rom_header", Qt::CaseInsensitive)) {
+                destOff = 0;
+            } else {
+                destOff = int(p.originalAddr - baseAddr);
+            }
+            if (destOff < 0 || destOff + p.data.size() > effectiveSize) continue;
+            memcpy(image.data() + destOff, p.data.constData(), p.data.size());
+        }
+
+        if (looksLikeKickstartHeader(image, effectiveSize)) {
+            finalizeKickstartChecksum(image, effectiveSize);
+        }
+
+        // If 256 KiB effective: mirror to fill 512 KiB bank.
+        if (effectiveSize == HALF_BANK) {
+            QByteArray out;
+            out.reserve(SLOT_SIZE);
+            out.append(image);
+            out.append(image);
+            return out;
+        }
+        return image;
+    }
+
+    /* ------------------------------------------------------------------
+       Fallback: simple concatenation (for monolithic parts, non-component
+       binaries, or parts without detectable original addresses).
+       Applies RomTag relocation as a best-effort fixup.
+       ------------------------------------------------------------------ */
+    QByteArray base;
+    base.reserve(SLOT_SIZE);
+    for (const auto& p : m_parts) base.append(p.data);
+
     if (base.size() <= HALF_BANK) {
         QByteArray half = base.left(HALF_BANK);
         if (half.size() < HALF_BANK) {
@@ -427,7 +530,6 @@ QByteArray BankWidget::buildTiled512k() const {
         return out;
     }
 
-    // > 256 KiB: keep linear layout and pad up to full 512 KiB bank.
     if (base.size() < SLOT_SIZE) {
         base.append(QByteArray(SLOT_SIZE - base.size(), char(0xff)));
     }
@@ -491,6 +593,7 @@ void BankWidget::addFiles() {
         part.name    = fi.fileName() + (autoSwap ? " [swap16]" : "");
         part.data    = data;
         part.swapped = autoSwap;
+        part.originalAddr = detectOriginalAddr(data, fi.fileName());
         m_parts.push_back(std::move(part));
 
         emit log(QString("Added to Slot %1: %2 (%3 KiB)")
