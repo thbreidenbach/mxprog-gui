@@ -270,6 +270,22 @@ quint32 BankWidget::detectOriginalAddr(const QByteArray& data, const QString& na
 }
 
 /* ---------------------------------------------------------------------------
+   verifyKickstartChecksum – re-compute the ones' complement sum over the
+   given effective range and return true iff it equals 0xFFFFFFFF.
+   ----------------------------------------------------------------------- */
+bool BankWidget::verifyKickstartChecksum(const QByteArray& image, int effectiveSize) {
+    if (effectiveSize <= 0 || effectiveSize > image.size() || (effectiveSize % 4) != 0)
+        return false;
+    quint32 sum = 0;
+    for (int off = 0; off < effectiveSize; off += 4) {
+        quint32 old = sum;
+        sum += readBe32(image, off);
+        if (sum < old) ++sum;
+    }
+    return (sum == 0xFFFFFFFFu);
+}
+
+/* ---------------------------------------------------------------------------
    relocateRomTags – patch absolute addresses inside Resident (RomTag)
    structures so that a bank composed from individually extracted components
    boots correctly even when modules are omitted or reordered.
@@ -596,8 +612,11 @@ void BankWidget::addFiles() {
         part.originalAddr = detectOriginalAddr(data, fi.fileName());
         m_parts.push_back(std::move(part));
 
-        emit log(QString("Added to Slot %1: %2 (%3 KiB)")
-                 .arg(m_bank).arg(fi.fileName() + (autoSwap ? " [swap16]" : "")).arg(data.size()/1024));
+        emit log(QString("Added to Slot %1: %2 (%3 KiB, origAddr=0x%4)")
+                 .arg(m_bank)
+                 .arg(fi.fileName() + (autoSwap ? " [swap16]" : ""))
+                 .arg(data.size()/1024)
+                 .arg(part.originalAddr, 6, 16, QLatin1Char('0')));
 
         const int halfBank = SLOT_SIZE / 2;
         if (beforeBytes <= halfBank && usedBytes() > halfBank) {
@@ -623,17 +642,76 @@ void BankWidget::doWriteSlot() {
         refreshUi();
     }
 
-    const auto issues = validatePartsForCurrentLayout();
-    for (const auto& issue : issues) {
-        emit log(QString("Slot %1 preflight: %2").arg(m_bank).arg(issue));
-    }
-
     if (!hasRomHeaderPart()) {
         emit log(QString("Slot %1 notice: no __rom_header part detected. Header/vectors may be incomplete for modified Kickstart ROMs.")
                  .arg(m_bank));
     }
 
+    // --- diagnostic: determine which build strategy will be used ---
+    static const int HALF_BANK = SLOT_SIZE / 2;
+    bool diagGapFill = (m_parts.size() > 1);
+    if (diagGapFill) {
+        for (const auto& p : m_parts) {
+            if (p.name.contains("__rom_header", Qt::CaseInsensitive)) continue;
+            if (p.originalAddr == 0) {
+                emit log(QString("Slot %1 diag: part '%2' has no detectable originalAddr → concatenation fallback")
+                         .arg(m_bank).arg(p.name));
+                diagGapFill = false;
+                break;
+            }
+        }
+    }
+    if (diagGapFill) {
+        emit log(QString("Slot %1 diag: using GAP-FILL placement (%2 parts)")
+                 .arg(m_bank).arg(m_parts.size()));
+        for (const auto& p : m_parts) {
+            emit log(QString("  %1: origAddr=0x%2, size=%3")
+                     .arg(p.name)
+                     .arg(p.originalAddr, 6, 16, QLatin1Char('0'))
+                     .arg(p.data.size()));
+        }
+    } else if (m_parts.size() > 1) {
+        emit log(QString("Slot %1 diag: using CONCATENATION fallback (gap-fill not possible)")
+                 .arg(m_bank));
+    }
+
     QByteArray img = buildTiled512k();
+
+    // --- diagnostic: verify checksum ---
+    // Compute effectiveSize the same way buildTiled512k does.
+    int effectiveSize;
+    if (diagGapFill) {
+        quint32 am = 0x01000000u;
+        for (const auto& p : m_parts) {
+            if (p.name.contains("__rom_header", Qt::CaseInsensitive)) continue;
+            if (p.originalAddr != 0 && p.originalAddr < am) am = p.originalAddr;
+        }
+        effectiveSize = (am < 0x00FC0000u) ? SLOT_SIZE : HALF_BANK;
+    } else {
+        effectiveSize = (usedBytes() <= HALF_BANK) ? HALF_BANK : SLOT_SIZE;
+    }
+    const bool csOk = verifyKickstartChecksum(img, effectiveSize);
+    const quint32 csVal = readBe32(img, effectiveSize - 4);
+    emit log(QString("Slot %1 diag: effectiveSize=%2, checksum=0x%3, verify=%4")
+             .arg(m_bank)
+             .arg(effectiveSize)
+             .arg(csVal, 8, 16, QLatin1Char('0'))
+             .arg(csOk ? "PASS" : "FAIL"));
+
+    // Log first 8 bytes (reset vectors) for sanity
+    if (img.size() >= 8) {
+        emit log(QString("Slot %1 diag: header bytes: %2 %3 %4 %5 %6 %7 %8 %9")
+                 .arg(m_bank)
+                 .arg(quint8(img[0]), 2, 16, QLatin1Char('0'))
+                 .arg(quint8(img[1]), 2, 16, QLatin1Char('0'))
+                 .arg(quint8(img[2]), 2, 16, QLatin1Char('0'))
+                 .arg(quint8(img[3]), 2, 16, QLatin1Char('0'))
+                 .arg(quint8(img[4]), 2, 16, QLatin1Char('0'))
+                 .arg(quint8(img[5]), 2, 16, QLatin1Char('0'))
+                 .arg(quint8(img[6]), 2, 16, QLatin1Char('0'))
+                 .arg(quint8(img[7]), 2, 16, QLatin1Char('0')));
+    }
+
     emit requestWriteSlot(m_bank, img);
 }
 

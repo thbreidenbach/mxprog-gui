@@ -61,6 +61,7 @@ private:
     static QStringList validateRomTags(const QByteArray& image, int effectiveSize);
     static int relocateRomTags(QByteArray& image, int effectiveSize);
     static quint32 detectOriginalAddr(const QByteArray& data, const QString& name);
+    static bool verifyKickstartChecksum(const QByteArray& image, int effectiveSize);
     QStringList validatePartRomTags(int effectiveSize) const;
     QStringList validatePartsForCurrentLayout() const;
     bool ensureRomHeaderFirst();
