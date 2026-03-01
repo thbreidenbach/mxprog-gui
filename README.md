@@ -11,6 +11,8 @@ In each bank meter, a center marker indicates 256 KiB. Up to 256 KiB the mirrore
 
 Checksum handling while composing a bank follows the additive-complement method: checksum longword is zeroed for calculation and then set so the 32-bit BE sum over the effective image equals `0xFFFFFFFF`.
 
+Before writing, Kickstart-like images now also run a RomTag plausibility validation pass (`rt_MatchTag` self-pointer, `rt_EndSkip` forward/in-range, `rt_Name` pointer in-range) and log issues that would typically cause red-screen/HALT.
+
 Each programming step saves the current buffer with a timestamp. Images can also be read from a flash and saved to disk.
 
 A new **Import/Analyze ROM** action can inspect a ROM, run sanity checks (including 2 MiB normalization/padding), compute SHA256 checksums, split it into 4 bank files, and additionally try to extract Kickstart-style functional components (RomTag scan, e.g. `exec.library`) into a `components/` folder plus `catalog.json` for verification/reassembly workflows.

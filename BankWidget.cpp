@@ -140,6 +140,12 @@ quint32 BankWidget::readBe32(const QByteArray& in, int off) {
     return (quint32(p[0]) << 24) | (quint32(p[1]) << 16) | (quint32(p[2]) << 8) | quint32(p[3]);
 }
 
+quint16 BankWidget::readBe16(const QByteArray& in, int off) {
+    if (off < 0 || off + 2 > in.size()) return 0;
+    const auto* p = reinterpret_cast<const unsigned char*>(in.constData() + off);
+    return (quint16(p[0]) << 8) | quint16(p[1]);
+}
+
 void BankWidget::writeBe32(QByteArray& out, int off, quint32 v) {
     if (off < 0 || off + 4 > out.size()) return;
     out[off + 0] = char((v >> 24) & 0xff);
@@ -151,16 +157,63 @@ void BankWidget::writeBe32(QByteArray& out, int off, quint32 v) {
 bool BankWidget::looksLikeKickstartHeader(const QByteArray& image, int effectiveSize) {
     if (effectiveSize < 0x20 || image.size() < effectiveSize) return false;
 
-    // KS2+ often has 0x1111 0x4EF9..., some images begin directly with 0x4EF9.
-    const quint16 w0 = quint16((unsigned char)image[0] << 8) | quint16((unsigned char)image[1]);
-    const quint16 w1 = quint16((unsigned char)image[2] << 8) | quint16((unsigned char)image[3]);
-    const bool hasJump = (w0 == 0x4EF9) || (w1 == 0x4EF9);
+    // Kickstart usually starts with 1111 4EF9... (KS2+) or FC00 03.. (KS1.x).
+    const quint16 w0 = readBe16(image, 0);
+    const quint16 w1 = readBe16(image, 2);
+    const bool hasJump = (w0 == 0x4EF9) || (w1 == 0x4EF9) || (w1 == 0xFC00);
 
-    const quint16 version = quint16((unsigned char)image[0x0C] << 8) | quint16((unsigned char)image[0x0D]);
-    const quint16 revision = quint16((unsigned char)image[0x0E] << 8) | quint16((unsigned char)image[0x0F]);
+    const quint16 version = readBe16(image, 0x0C);
+    const quint16 revision = readBe16(image, 0x0E);
     const bool plausibleVersion = (version >= 30 && version <= 60 && revision < 1000);
 
     return hasJump || plausibleVersion;
+}
+
+QStringList BankWidget::validateRomTags(const QByteArray& image, int effectiveSize) {
+    QStringList issues;
+    if (effectiveSize <= 0 || image.size() < effectiveSize) return issues;
+
+    const quint32 baseAddr = 0x01000000u - quint32(effectiveSize);
+    const quint32 endAddr = baseAddr + quint32(effectiveSize);
+
+    int checked = 0;
+    for (int off = 0; off + 26 <= effectiveSize; ++off) {
+        if (readBe16(image, off) != 0x4AFC) continue;
+
+        const quint32 matchTag = readBe32(image, off + 2) & 0x00FFFFFFu;
+        const quint32 endSkip = readBe32(image, off + 6) & 0x00FFFFFFu;
+        const quint32 namePtr = readBe32(image, off + 14) & 0x00FFFFFFu;
+
+        const quint32 selfAddr = baseAddr + quint32(off);
+        if (matchTag != selfAddr) {
+            issues << QString("RomTag @0x%1 has rt_MatchTag=0x%2 (expected self 0x%3)")
+                          .arg(off, 6, 16, QLatin1Char('0'))
+                          .arg(matchTag, 6, 16, QLatin1Char('0'))
+                          .arg(selfAddr & 0x00FFFFFFu, 6, 16, QLatin1Char('0'));
+        }
+        if (endSkip <= selfAddr || endSkip > endAddr) {
+            issues << QString("RomTag @0x%1 has invalid rt_EndSkip=0x%2")
+                          .arg(off, 6, 16, QLatin1Char('0'))
+                          .arg(endSkip, 6, 16, QLatin1Char('0'));
+        }
+        if (namePtr < baseAddr || namePtr >= endAddr) {
+            issues << QString("RomTag @0x%1 has out-of-range rt_Name=0x%2")
+                          .arg(off, 6, 16, QLatin1Char('0'))
+                          .arg(namePtr, 6, 16, QLatin1Char('0'));
+        }
+
+        ++checked;
+        if (issues.size() >= 16) {
+            issues << "Further RomTag issues suppressed.";
+            break;
+        }
+    }
+
+    if (checked == 0) {
+        issues << "No RomTag signatures (0x4AFC) found in composed image.";
+    }
+
+    return issues;
 }
 
 void BankWidget::finalizeKickstartChecksum(QByteArray& image, int effectiveSize) {
@@ -198,7 +251,9 @@ QByteArray BankWidget::buildTiled512k() const {
         if (half.size() < HALF_BANK) {
             half.append(QByteArray(HALF_BANK - half.size(), char(0xff)));
         }
-        finalizeKickstartChecksum(half, HALF_BANK);
+        if (looksLikeKickstartHeader(half, HALF_BANK)) {
+            finalizeKickstartChecksum(half, HALF_BANK);
+        }
 
         QByteArray out;
         out.reserve(SLOT_SIZE);
@@ -213,7 +268,9 @@ QByteArray BankWidget::buildTiled512k() const {
     }
 
     QByteArray out = base.left(SLOT_SIZE);
-    finalizeKickstartChecksum(out, SLOT_SIZE);
+    if (looksLikeKickstartHeader(out, SLOT_SIZE)) {
+        finalizeKickstartChecksum(out, SLOT_SIZE);
+    }
     return out;
 }
 
@@ -298,6 +355,13 @@ void BankWidget::doWriteSlot() {
     }
 
     QByteArray img = buildTiled512k();
+    const int effectiveSize = (usedBytes() <= SLOT_SIZE / 2) ? SLOT_SIZE / 2 : SLOT_SIZE;
+    if (looksLikeKickstartHeader(img, effectiveSize)) {
+        const auto issues = validateRomTags(img, effectiveSize);
+        for (const auto& issue : issues) {
+            emit log(QString("Slot %1 RomTag check: %2").arg(m_bank).arg(issue));
+        }
+    }
     emit requestWriteSlot(m_bank, img);
 }
 
