@@ -53,6 +53,7 @@ public slots:
 private:
     static QByteArray swap16(const QByteArray& in);
     static bool shouldAutoSwap(const QFileInfo& fi);
+    static bool hasCanonicalSignatures(const QByteArray& data);
     static quint32 readBe32(const QByteArray& in, int off);
     static quint16 readBe16(const QByteArray& in, int off);
     static void writeBe32(QByteArray& out, int off, quint32 v);

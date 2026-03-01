@@ -6,6 +6,9 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QMessageBox>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
 #include <cstring>
 
 MeterBar::MeterBar(QWidget* parent) : QWidget(parent) {
@@ -127,12 +130,36 @@ QByteArray BankWidget::swap16(const QByteArray& in) {
 bool BankWidget::shouldAutoSwap(const QFileInfo& fi) {
     const QString ext = fi.suffix().toLower();
 
-    // Explicit .bin payloads are treated as already canonical/programmer-ready.
-    if (ext == "bin") return false;
+    // Only .rom files use the historical byte-swapped (word-swapped) format
+    // that EPROM programmers expect.  Everything else is canonical big-endian.
+    return (ext == "rom");
+}
 
-    // Everything else (e.g. .rom, .library, .device, extensionless components)
-    // is auto-swapped for flash/programmer byte ordering.
-    return true;
+/* ---------------------------------------------------------------------------
+   hasCanonicalSignatures – heuristic: does `data` look like canonical
+   big-endian Amiga ROM content?  Checks for RomTag magic (0x4AFC) and
+   Kickstart header patterns at plausible positions.
+   ----------------------------------------------------------------------- */
+bool BankWidget::hasCanonicalSignatures(const QByteArray& data) {
+    if (data.size() < 2) return false;
+
+    // Check first word for RomTag magic.
+    if (readBe16(data, 0) == 0x4AFC) return true;
+
+    // Kickstart header: 0x1111 0x4EF9  or  0x4EF9 at word 0.
+    if (data.size() >= 4) {
+        const quint16 w0 = readBe16(data, 0);
+        const quint16 w1 = readBe16(data, 2);
+        if (w0 == 0x1111 && w1 == 0x4EF9) return true;
+        if (w0 == 0x4EF9) return true;
+    }
+
+    // Scan first 256 bytes for RomTag (some components have a small preamble).
+    for (int off = 2; off + 2 <= qMin(data.size(), 256); off += 2) {
+        if (readBe16(data, off) == 0x4AFC) return true;
+    }
+
+    return false;
 }
 
 quint32 BankWidget::readBe32(const QByteArray& in, int off) {
@@ -591,8 +618,47 @@ void BankWidget::addFiles() {
             QMessageBox::warning(this, "Open failed", fi.fileName()); continue;
         }
         QByteArray raw = f.readAll();
-        const bool autoSwap = shouldAutoSwap(fi);
-        QByteArray data = autoSwap ? swap16(raw) : raw;
+
+        // --- Intelligent byte-order detection ---
+        // 1. Extension hint (shouldAutoSwap): only .rom is swapped.
+        // 2. Content verification: check if the result contains recognisable
+        //    big-endian structures (0x4AFC RomTag, Kickstart header).
+        //    If the extension-based choice looks wrong, try the other order.
+        bool autoSwap = shouldAutoSwap(fi);
+        QByteArray data;
+
+        if (fi.suffix().toLower() == "bin") {
+            // .bin is ALWAYS canonical – no second-guessing.
+            data = raw;
+            autoSwap = false;
+        } else if (hasCanonicalSignatures(raw)) {
+            // Raw data already looks canonical big-endian → use as-is.
+            data = raw;
+            if (autoSwap) {
+                emit log(QString("Note: %1 has canonical signatures despite .rom extension; using raw data.")
+                         .arg(fi.fileName()));
+                autoSwap = false;
+            }
+        } else {
+            QByteArray swapped = swap16(raw);
+            if (hasCanonicalSignatures(swapped)) {
+                // Swapped data looks canonical → input was byte-swapped.
+                data = swapped;
+                if (!autoSwap) {
+                    emit log(QString("Note: auto-detected byte-swapped format for %1 (converted to canonical).")
+                             .arg(fi.fileName()));
+                }
+                autoSwap = true;
+            } else {
+                // Neither order shows recognisable structures → use extension hint.
+                data = autoSwap ? swap16(raw) : raw;
+                emit log(QString("Warning: %1 has no recognisable ROM/RomTag signatures in either byte order; "
+                                 "using extension-based heuristic (%2).")
+                         .arg(fi.fileName())
+                         .arg(autoSwap ? "swapped" : "as-is"));
+            }
+        }
+
         if (data.size() > SLOT_SIZE) {
             QMessageBox::warning(this, "Too large",
                                  QString("%1 exceeds 512 KiB").arg(fi.fileName()));
@@ -610,13 +676,16 @@ void BankWidget::addFiles() {
         part.data    = data;
         part.swapped = autoSwap;
         part.originalAddr = detectOriginalAddr(data, fi.fileName());
+
+        const QString partLabel = part.name;
+        const quint32 partAddr  = part.originalAddr;
         m_parts.push_back(std::move(part));
 
         emit log(QString("Added to Slot %1: %2 (%3 KiB, origAddr=0x%4)")
                  .arg(m_bank)
-                 .arg(fi.fileName() + (autoSwap ? " [swap16]" : ""))
+                 .arg(partLabel)
                  .arg(data.size()/1024)
-                 .arg(part.originalAddr, 6, 16, QLatin1Char('0')));
+                 .arg(partAddr, 6, 16, QLatin1Char('0')));
 
         const int halfBank = SLOT_SIZE / 2;
         if (beforeBytes <= halfBank && usedBytes() > halfBank) {
@@ -710,6 +779,19 @@ void BankWidget::doWriteSlot() {
                  .arg(quint8(img[5]), 2, 16, QLatin1Char('0'))
                  .arg(quint8(img[6]), 2, 16, QLatin1Char('0'))
                  .arg(quint8(img[7]), 2, 16, QLatin1Char('0')));
+    }
+
+    // Save diagnostic image to temp for inspection / comparison
+    {
+        const QString diagPath = QDir::temp().filePath(QString("slot%1_diag.bin").arg(m_bank));
+        QFile diagFile(diagPath);
+        if (diagFile.open(QIODevice::WriteOnly)) {
+            diagFile.write(img);
+            diagFile.close();
+            const QByteArray sha = QCryptographicHash::hash(img, QCryptographicHash::Sha256).toHex().left(16);
+            emit log(QString("Slot %1 diag: image saved to %2 (%3 bytes, sha256=%4…)")
+                     .arg(m_bank).arg(diagPath).arg(img.size()).arg(QString::fromLatin1(sha)));
+        }
     }
 
     emit requestWriteSlot(m_bank, img);
