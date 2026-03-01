@@ -5,6 +5,7 @@
 #include <QVector>
 #include <QPushButton>
 #include <QFileInfo>
+#include <QtGlobal>
 
 struct RomPart {
     QString     name;
@@ -50,6 +51,10 @@ public slots:
 private:
     static QByteArray swap16(const QByteArray& in);
     static bool shouldAutoSwap(const QFileInfo& fi);
+    static quint32 readBe32(const QByteArray& in, int off);
+    static void writeBe32(QByteArray& out, int off, quint32 v);
+    static void finalizeKickstartChecksum(QByteArray& image, int effectiveSize);
+    static bool looksLikeKickstartHeader(const QByteArray& image, int effectiveSize);
     void refreshUi();
 
     int m_bank;

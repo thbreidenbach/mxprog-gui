@@ -3,7 +3,7 @@ This is a GUI for https://github.com/cdhooper/mx29f1615_programmer, a hardware/s
 
 Those flash can be utilized in Amiga Computers and can easily hold 4 different Amiga ROM Images typically provided as .bin binaries.
 
-The GUI allows for either .rom or .bin files which are correctly byte swapped given a .rom file. For composed banks: payloads up to 256kB are padded to 256kB and mirrored to 512kB; payloads above 256kB are padded with 0xFF up to 512kB.
+The GUI allows for either .rom or .bin files which are correctly byte swapped given a .rom file. For composed banks: payloads up to 256kB are padded to 256kB and mirrored to 512kB; payloads above 256kB are padded with 0xFF up to 512kB. For Kickstart-like payloads, the ROM checksum longword is recalculated automatically (sum of 32-bit big-endian words over effective image equals 0xFFFFFFFF).
 
 Empty Banks are filled with ff.
 

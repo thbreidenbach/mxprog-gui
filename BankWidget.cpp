@@ -134,6 +134,50 @@ bool BankWidget::shouldAutoSwap(const QFileInfo& fi) {
     return true;
 }
 
+quint32 BankWidget::readBe32(const QByteArray& in, int off) {
+    if (off < 0 || off + 4 > in.size()) return 0;
+    const auto* p = reinterpret_cast<const unsigned char*>(in.constData() + off);
+    return (quint32(p[0]) << 24) | (quint32(p[1]) << 16) | (quint32(p[2]) << 8) | quint32(p[3]);
+}
+
+void BankWidget::writeBe32(QByteArray& out, int off, quint32 v) {
+    if (off < 0 || off + 4 > out.size()) return;
+    out[off + 0] = char((v >> 24) & 0xff);
+    out[off + 1] = char((v >> 16) & 0xff);
+    out[off + 2] = char((v >> 8) & 0xff);
+    out[off + 3] = char(v & 0xff);
+}
+
+bool BankWidget::looksLikeKickstartHeader(const QByteArray& image, int effectiveSize) {
+    if (effectiveSize < 0x20 || image.size() < effectiveSize) return false;
+
+    // KS2+ often has 0x1111 0x4EF9..., some images begin directly with 0x4EF9.
+    const quint16 w0 = quint16((unsigned char)image[0] << 8) | quint16((unsigned char)image[1]);
+    const quint16 w1 = quint16((unsigned char)image[2] << 8) | quint16((unsigned char)image[3]);
+    const bool hasJump = (w0 == 0x4EF9) || (w1 == 0x4EF9);
+
+    const quint16 version = quint16((unsigned char)image[0x0C] << 8) | quint16((unsigned char)image[0x0D]);
+    const quint16 revision = quint16((unsigned char)image[0x0E] << 8) | quint16((unsigned char)image[0x0F]);
+    const bool plausibleVersion = (version >= 30 && version <= 60 && revision < 1000);
+
+    return hasJump || plausibleVersion;
+}
+
+void BankWidget::finalizeKickstartChecksum(QByteArray& image, int effectiveSize) {
+    if (effectiveSize <= 0 || effectiveSize > image.size() || (effectiveSize % 4) != 0) return;
+
+    const int checksumOff = effectiveSize - 4;
+    writeBe32(image, checksumOff, 0);
+
+    quint64 sum = 0;
+    for (int off = 0; off < effectiveSize; off += 4) {
+        sum += readBe32(image, off);
+    }
+    const quint32 partial = quint32(sum & 0xFFFFFFFFu);
+    const quint32 checksum = quint32((0x100000000ULL - partial) & 0xFFFFFFFFu);
+    writeBe32(image, checksumOff, checksum);
+}
+
 QByteArray BankWidget::buildTiled512k() const {
     QByteArray base;
     base.reserve(SLOT_SIZE);
@@ -152,6 +196,8 @@ QByteArray BankWidget::buildTiled512k() const {
         if (half.size() < HALF_BANK) {
             half.append(QByteArray(HALF_BANK - half.size(), char(0xff)));
         }
+        finalizeKickstartChecksum(half, HALF_BANK);
+
         QByteArray out;
         out.reserve(SLOT_SIZE);
         out.append(half);
@@ -163,7 +209,12 @@ QByteArray BankWidget::buildTiled512k() const {
     if (base.size() < SLOT_SIZE) {
         base.append(QByteArray(SLOT_SIZE - base.size(), char(0xff)));
     }
-    return base.left(SLOT_SIZE);
+
+    QByteArray out = base.left(SLOT_SIZE);
+    if (looksLikeKickstartHeader(out, SLOT_SIZE)) {
+        finalizeKickstartChecksum(out, SLOT_SIZE);
+    }
+    return out;
 }
 
 
