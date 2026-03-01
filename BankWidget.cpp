@@ -229,7 +229,7 @@ void BankWidget::finalizeKickstartChecksum(QByteArray& image, int effectiveSize)
         sum += readBe32(image, off);
     }
     const quint32 partial = quint32(sum & 0xFFFFFFFFu);
-    const quint32 checksum = quint32((0x100000000ULL - partial) & 0xFFFFFFFFu);
+    const quint32 checksum = ~partial;   // ones' complement: partial + checksum == 0xFFFFFFFF
     writeBe32(image, checksumOff, checksum);
 }
 
