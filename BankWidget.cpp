@@ -278,10 +278,17 @@ quint32 BankWidget::detectOriginalAddr(const QByteArray& data, const QString& na
     if (name.contains("__rom_header", Qt::CaseInsensitive))
         return 0;
 
+    // Accept any 24-bit address that could be an Amiga ROM mapping.
+    // Standard Kickstart ranges: 256K→0xFC0000, 512K→0xF80000,
+    // 1MB→0xF00000, 2MB→0xE00000.  Extended/card ROMs can start lower.
+    auto plausibleRomAddr = [](quint32 addr) -> bool {
+        return addr >= 0x00800000u && addr < 0x01000000u;
+    };
+
     // Regular component: RomTag should be at the very start.
     if (data.size() >= 6 && readBe16(data, 0) == 0x4AFC) {
         quint32 matchTag = readBe32(data, 2) & 0x00FFFFFFu;
-        if (matchTag >= 0x00F80000u && matchTag < 0x01000000u)
+        if (plausibleRomAddr(matchTag))
             return matchTag;
     }
 
@@ -289,7 +296,7 @@ quint32 BankWidget::detectOriginalAddr(const QByteArray& data, const QString& na
     for (int off = 2; off + 6 <= qMin(data.size(), 64); off += 2) {
         if (readBe16(data, off) != 0x4AFC) continue;
         quint32 matchTag = readBe32(data, off + 2) & 0x00FFFFFFu;
-        if (matchTag >= 0x00F80000u && matchTag < 0x01000000u)
+        if (plausibleRomAddr(matchTag))
             return matchTag;
     }
 
@@ -512,39 +519,47 @@ QByteArray BankWidget::buildTiled512k() const {
         }
     }
 
-    if (canGapFill && addrMin >= 0x00F80000u && addrMax <= 0x01000000u) {
-        // Determine original ROM size / effective size from address range.
-        // If any address is below 0xFC0000, original ROM was 512 KiB.
-        const int effectiveSize = (addrMin < 0x00FC0000u) ? SLOT_SIZE : HALF_BANK;
-        const quint32 baseAddr = 0x01000000u - quint32(effectiveSize);
+    if (canGapFill && addrMin >= 0x00800000u && addrMax <= 0x01000000u) {
+        // Determine original ROM size from the address range spanned.
+        // baseAddr = 0x01000000 - effectiveSize; pick the smallest
+        // power-of-two effectiveSize (256K or 512K) whose base ≤ addrMin.
+        int effectiveSize = HALF_BANK;  // try 256 KiB first
+        quint32 baseAddr = 0x01000000u - quint32(effectiveSize);
+        if (addrMin < baseAddr) {
+            effectiveSize = SLOT_SIZE;  // need 512 KiB
+            baseAddr = 0x01000000u - quint32(effectiveSize);
+        }
 
-        QByteArray image(effectiveSize, char(0xff));
+        if (addrMin >= baseAddr) {      // addresses fit
+            QByteArray image(effectiveSize, char(0xff));
 
-        // Place each part at its original ROM offset.
-        for (const auto& p : m_parts) {
-            int destOff;
-            if (p.name.contains("__rom_header", Qt::CaseInsensitive)) {
-                destOff = 0;
-            } else {
-                destOff = int(p.originalAddr - baseAddr);
+            // Place each part at its original ROM offset.
+            for (const auto& p : m_parts) {
+                int destOff;
+                if (p.name.contains("__rom_header", Qt::CaseInsensitive)) {
+                    destOff = 0;
+                } else {
+                    destOff = int(p.originalAddr - baseAddr);
+                }
+                if (destOff < 0 || destOff + p.data.size() > effectiveSize) continue;
+                memcpy(image.data() + destOff, p.data.constData(), p.data.size());
             }
-            if (destOff < 0 || destOff + p.data.size() > effectiveSize) continue;
-            memcpy(image.data() + destOff, p.data.constData(), p.data.size());
-        }
 
-        if (looksLikeKickstartHeader(image, effectiveSize)) {
-            finalizeKickstartChecksum(image, effectiveSize);
-        }
+            if (looksLikeKickstartHeader(image, effectiveSize)) {
+                finalizeKickstartChecksum(image, effectiveSize);
+            }
 
-        // If 256 KiB effective: mirror to fill 512 KiB bank.
-        if (effectiveSize == HALF_BANK) {
-            QByteArray out;
-            out.reserve(SLOT_SIZE);
-            out.append(image);
-            out.append(image);
-            return out;
+            // If 256 KiB effective: mirror to fill 512 KiB bank.
+            if (effectiveSize == HALF_BANK) {
+                QByteArray out;
+                out.reserve(SLOT_SIZE);
+                out.append(image);
+                out.append(image);
+                return out;
+            }
+            return image;
         }
-        return image;
+        // else: addresses don't fit in 512 KiB → fall through to concatenation
     }
 
     /* ------------------------------------------------------------------
@@ -681,11 +696,16 @@ void BankWidget::addFiles() {
         const quint32 partAddr  = part.originalAddr;
         m_parts.push_back(std::move(part));
 
-        emit log(QString("Added to Slot %1: %2 (%3 KiB, origAddr=0x%4)")
+        // Log first 6 bytes + detection result for diagnostics
+        QString hexPrefix;
+        for (int b = 0; b < qMin(data.size(), 6); ++b)
+            hexPrefix += QString("%1 ").arg(quint8(data[b]), 2, 16, QLatin1Char('0'));
+        emit log(QString("Added to Slot %1: %2 (%3 KiB, origAddr=0x%4, first=[%5])")
                  .arg(m_bank)
                  .arg(partLabel)
                  .arg(data.size()/1024)
-                 .arg(partAddr, 6, 16, QLatin1Char('0')));
+                 .arg(partAddr, 6, 16, QLatin1Char('0'))
+                 .arg(hexPrefix.trimmed()));
 
         const int halfBank = SLOT_SIZE / 2;
         if (beforeBytes <= halfBank && usedBytes() > halfBank) {

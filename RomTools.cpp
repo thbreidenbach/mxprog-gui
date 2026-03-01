@@ -217,7 +217,32 @@ RomMeta inspectRom(const QString& path) {
         return meta;
     }
 
+    // Determine byte order: .rom files are historically byte-swapped.
+    // But verify with content: look for 0x4AFC (RomTag) or 0x1111 0x4EF9
+    // (Kickstart header) to auto-detect the actual byte order.
     meta.alreadyByteswapped = fi.suffix().compare("rom", Qt::CaseInsensitive) == 0;
+    {
+        auto hasSignatures = [](const QByteArray& d) -> bool {
+            if (d.size() < 4) return false;
+            const auto rd16 = [&](int off) -> quint16 {
+                const auto* p = reinterpret_cast<const unsigned char*>(d.constData() + off);
+                return (quint16(p[0]) << 8) | quint16(p[1]);
+            };
+            if (rd16(0) == 0x4AFC) return true;
+            if (rd16(0) == 0x1111 && rd16(2) == 0x4EF9) return true;
+            if (rd16(0) == 0x4EF9) return true;
+            // Scan first 256 bytes for RomTag magic.
+            for (int off = 2; off + 2 <= qMin(d.size(), 256); off += 2)
+                if (rd16(off) == 0x4AFC) return true;
+            return false;
+        };
+        if (hasSignatures(raw)) {
+            meta.alreadyByteswapped = false;   // raw is canonical
+        } else if (hasSignatures(swap16(raw))) {
+            meta.alreadyByteswapped = true;    // raw is byte-swapped
+        }
+        // else: keep extension-based heuristic
+    }
     meta.canonicalData = meta.alreadyByteswapped ? swap16(raw) : raw;
 
     if (meta.canonicalData.size() < SLOT_SIZE) {
@@ -267,9 +292,11 @@ QVector<ComponentInfo> extractComponents(const QByteArray& canonicalRom, QString
         if (!fallback.isEmpty()) {
             if (warnings) warnings->push_back("RomTag scan only matched after word-swap fallback.");
 
-            // Important: always export canonical byte order component payloads.
+            // The swap-fallback means canonicalRom was actually byte-swapped;
+            // `swapped` is the true canonical (big-endian) data.  Extract
+            // component payloads from the correct byte order.
             for (auto& c : fallback) {
-                c.data = canonicalRom.mid(c.offset, c.size);
+                c.data = swapped.mid(c.offset, c.size);
                 c.checksumSha256 = QCryptographicHash::hash(c.data, QCryptographicHash::Sha256);
             }
             out = std::move(fallback);
