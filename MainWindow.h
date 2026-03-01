@@ -23,6 +23,7 @@ private slots:
     void writeSlot(int bank, const QByteArray& img512k);
     void writeAllMonolithic();
     void saveMonolithic();
+    void importRomAndCatalog();
     void identify();
     void erase();
     void readDump();
