@@ -150,6 +150,19 @@ QVector<ComponentInfo> scanComponentsWithBase(const QByteArray& rom, quint32 bas
     }
 
     QVector<ComponentInfo> finalOut;
+
+    // Preserve bytes before the first detected RomTag as dedicated header block.
+    // Without this prelude, reassembled ROMs may miss vectors/startup header.
+    if (!dedup.isEmpty() && dedup[0].offset > 0) {
+        ComponentInfo header;
+        header.name = "__rom_header";
+        header.offset = 0;
+        header.size = dedup[0].offset;
+        header.data = rom.left(header.size);
+        header.checksumSha256 = QCryptographicHash::hash(header.data, QCryptographicHash::Sha256);
+        finalOut.push_back(std::move(header));
+    }
+
     for (auto& c : dedup) {
         if (c.size > 0) finalOut.push_back(std::move(c));
     }
