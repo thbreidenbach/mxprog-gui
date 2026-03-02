@@ -48,4 +48,9 @@ bool writeCatalog(const QString& outDir,
                   const QVector<ComponentInfo>& components,
                   QString* error);
 
+bool rebuildFromCatalog(const QString& catalogPath,
+                        QByteArray* outCanonicalRom,
+                        QStringList* warnings,
+                        QString* error);
+
 } // namespace RomTools

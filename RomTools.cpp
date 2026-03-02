@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonValue>
 #include <QtGlobal>
 #include <algorithm>
 #include <cstdlib>
@@ -202,6 +203,29 @@ bool hasValidKickChecksum(const QByteArray& rom) {
         sum += readBe32(rom, off);
     }
     return (quint32(sum & 0xFFFFFFFFu) == 0xFFFFFFFFu);
+}
+
+
+void finalizeKickChecksum(QByteArray& image, int effectiveSize) {
+    if (effectiveSize <= 0 || effectiveSize > image.size() || (effectiveSize % 4) != 0) return;
+
+    const int checksumOff = effectiveSize - 4;
+    image[checksumOff + 0] = 0;
+    image[checksumOff + 1] = 0;
+    image[checksumOff + 2] = 0;
+    image[checksumOff + 3] = 0;
+
+    quint64 sum = 0;
+    for (int off = 0; off < effectiveSize; off += 4) {
+        sum += readBe32(image, off);
+    }
+    const quint32 partial = quint32(sum & 0xFFFFFFFFu);
+    const quint32 checksum = quint32((0x100000000ULL - partial) & 0xFFFFFFFFu);
+
+    image[checksumOff + 0] = char((checksum >> 24) & 0xff);
+    image[checksumOff + 1] = char((checksum >> 16) & 0xff);
+    image[checksumOff + 2] = char((checksum >> 8) & 0xff);
+    image[checksumOff + 3] = char(checksum & 0xff);
 }
 
 void separateTrailingChecksum(QVector<ComponentInfo>& comps, const QByteArray& rom, QStringList* warnings) {
@@ -436,6 +460,77 @@ bool writeCatalog(const QString& outDir,
     catalog.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
     catalog.close();
 
+    return true;
+}
+
+
+bool rebuildFromCatalog(const QString& catalogPath,
+                        QByteArray* outCanonicalRom,
+                        QStringList* warnings,
+                        QString* error) {
+    if (!outCanonicalRom) {
+        if (error) *error = "Output buffer is null.";
+        return false;
+    }
+
+    QFile catalogFile(catalogPath);
+    if (!catalogFile.open(QIODevice::ReadOnly)) {
+        if (error) *error = QString("Could not open catalog: %1").arg(catalogPath);
+        return false;
+    }
+
+    QJsonParseError pe;
+    const auto doc = QJsonDocument::fromJson(catalogFile.readAll(), &pe);
+    if (pe.error != QJsonParseError::NoError || !doc.isObject()) {
+        if (error) *error = QString("Invalid catalog JSON: %1").arg(pe.errorString());
+        return false;
+    }
+
+    const QJsonObject root = doc.object();
+    const int canonicalSize = root.value("canonicalSize").toInt();
+    if (canonicalSize <= 0 || canonicalSize > TOTAL_BYTES) {
+        if (error) *error = QString("Invalid canonicalSize in catalog: %1").arg(canonicalSize);
+        return false;
+    }
+
+    QByteArray image(canonicalSize, char(0xff));
+
+    const QDir baseDir = QFileInfo(catalogPath).absoluteDir();
+    const QJsonArray comps = root.value("components").toArray();
+    for (const auto& v : comps) {
+        if (!v.isObject()) continue;
+        const QJsonObject c = v.toObject();
+        const QString name = c.value("name").toString();
+        const QString rel = c.value("file").toString();
+        const int offset = c.value("offset").toInt();
+        const int size = c.value("size").toInt();
+
+        if (name == "__rom_checksum") continue; // derived field
+        if (rel.isEmpty() || offset < 0 || size <= 0) continue;
+
+        QFile f(baseDir.filePath(rel));
+        if (!f.open(QIODevice::ReadOnly)) {
+            if (warnings) warnings->push_back(QString("Missing component file: %1").arg(rel));
+            continue;
+        }
+        const QByteArray data = f.readAll();
+        const int writeLen = qMin(size, data.size());
+        if (offset + writeLen > image.size()) {
+            if (warnings) warnings->push_back(QString("Component out of range skipped: %1").arg(name));
+            continue;
+        }
+        std::copy_n(data.constData(), writeLen, image.data() + offset);
+    }
+
+    // Recompute checksum in canonical image space.
+    if ((image.size() == 256 * 1024 || image.size() == 512 * 1024) && (image.size() % 4 == 0)) {
+        finalizeKickChecksum(image, image.size());
+    } else if (image.size() > 0 && (image.size() % 4 == 0)) {
+        // For other valid aligned sizes, still finalize on full canonical range.
+        finalizeKickChecksum(image, image.size());
+    }
+
+    *outCanonicalRom = std::move(image);
     return true;
 }
 

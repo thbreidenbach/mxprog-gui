@@ -24,6 +24,7 @@ private slots:
     void writeAllMonolithic();
     void saveMonolithic();
     void importRomAndCatalog();
+    void rebuildFromCatalog();
     void identify();
     void erase();
     void readDump();
