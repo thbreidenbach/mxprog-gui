@@ -59,6 +59,7 @@ private:
     static void finalizeKickstartChecksum(QByteArray& image, int effectiveSize);
     static bool looksLikeKickstartHeader(const QByteArray& image, int effectiveSize);
     static QStringList validateRomTags(const QByteArray& image, int effectiveSize);
+    static bool relocateRomTagPointers(QByteArray& image, int effectiveSize, QStringList* notes = nullptr);
     QStringList validatePartRomTags(int effectiveSize) const;
     QStringList validatePartsForCurrentLayout() const;
     bool ensureRomHeaderFirst();
