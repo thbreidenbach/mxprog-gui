@@ -13,8 +13,6 @@ Checksum handling while composing a bank follows the additive-complement method:
 
 Before writing, Kickstart-like images now also run a RomTag plausibility validation pass (`rt_MatchTag` self-pointer, `rt_EndSkip` forward/in-range, `rt_Name` pointer in-range) and log issues that would typically cause red-screen/HALT.
 
-During bank build, resident RomTag pointer fields are rebased to the current bank mapping (`MatchTag`, `EndSkip`, `Name`, `IdString`, `Init`) before checksum finalization, to keep reassembled component sets consistent after module reordering/omission.
-
 Preflight plausibility now also evaluates each loaded part against its current placement in the composed image (reacts to composition/order changes) and auto-moves `__rom_header` to the first position before writing.
 
 Each programming step saves the current buffer with a timestamp. Images can also be read from a flash and saved to disk.

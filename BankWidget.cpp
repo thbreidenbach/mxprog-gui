@@ -166,62 +166,6 @@ bool BankWidget::looksLikeKickstartHeader(const QByteArray& image, int effective
     return hasJump || plausibleVersion;
 }
 
-bool BankWidget::relocateRomTagPointers(QByteArray& image, int effectiveSize, QStringList* notes) {
-    if (effectiveSize <= 0 || image.size() < effectiveSize) return false;
-
-    quint32 oldBase = 0;
-    bool haveOldBase = false;
-    const quint32 newBase = 0x01000000u - quint32(effectiveSize);
-
-    for (int off = 0; off + 26 <= effectiveSize; ++off) {
-        if (readBe16(image, off) != 0x4AFC) continue;
-
-        const quint32 matchTag24 = readBe32(image, off + 2) & 0x00FFFFFFu;
-        if (!haveOldBase && matchTag24 >= quint32(off)) {
-            const quint32 candidate = (matchTag24 - quint32(off)) & 0x00FFFFFFu;
-            const quint32 end = candidate + quint32(effectiveSize);
-            if (end <= 0x01000000u) {
-                oldBase = candidate;
-                haveOldBase = true;
-            }
-        }
-    }
-
-    if (!haveOldBase) return false;
-
-    auto translate = [&](quint32 ptr24) -> quint32 {
-        if (ptr24 >= oldBase && ptr24 < oldBase + quint32(effectiveSize)) {
-            return newBase + (ptr24 - oldBase);
-        }
-        return ptr24;
-    };
-
-    int changed = 0;
-    for (int off = 0; off + 26 <= effectiveSize; ++off) {
-        if (readBe16(image, off) != 0x4AFC) continue;
-
-        const int ptrFields[] = {2, 6, 14, 18, 22}; // MatchTag, EndSkip, Name, IdString, Init
-        for (int field : ptrFields) {
-            const quint32 oldFull = readBe32(image, off + field);
-            const quint32 old24 = oldFull & 0x00FFFFFFu;
-            const quint32 translated = translate(old24) & 0x00FFFFFFu;
-            if (translated != old24) {
-                const quint32 patched = (oldFull & 0xFF000000u) | translated;
-                writeBe32(image, off + field, patched);
-                ++changed;
-            }
-        }
-    }
-
-    if (notes && changed > 0) {
-        notes->push_back(QString("Relocated %1 RomTag pointer fields to bank base 0x%2.")
-                         .arg(changed)
-                         .arg(newBase & 0x00FFFFFFu, 6, 16, QLatin1Char('0')));
-    }
-
-    return changed > 0;
-}
-
 QStringList BankWidget::validateRomTags(const QByteArray& image, int effectiveSize) {
     QStringList issues;
     if (effectiveSize <= 0 || image.size() < effectiveSize) return issues;
@@ -305,9 +249,6 @@ QByteArray BankWidget::buildTiled512k() const {
             half.append(QByteArray(HALF_BANK - half.size(), char(0xff)));
         }
 
-        // Rebase resident pointers to current bank mapping before checksum finalization.
-        relocateRomTagPointers(half, HALF_BANK, nullptr);
-
         if (looksLikeKickstartHeader(half, HALF_BANK) || hasRomHeaderPart()) {
             finalizeKickstartChecksum(half, HALF_BANK);
         }
@@ -325,9 +266,6 @@ QByteArray BankWidget::buildTiled512k() const {
     }
 
     QByteArray out = base.left(SLOT_SIZE);
-
-    // Rebase resident pointers to current bank mapping before checksum finalization.
-    relocateRomTagPointers(out, SLOT_SIZE, nullptr);
 
     if (looksLikeKickstartHeader(out, SLOT_SIZE) || hasRomHeaderPart()) {
         finalizeKickstartChecksum(out, SLOT_SIZE);
@@ -428,14 +366,6 @@ void BankWidget::doWriteSlot() {
     if (hadHeaderFirst != hasHeaderFirst || execBefore != execAfter) {
         emit log(QString("Slot %1: normalized component order (__rom_header first, exec early) before write.").arg(m_bank));
         refreshUi();
-    }
-
-    const int effectiveSize = (usedBytes() <= SLOT_SIZE / 2) ? SLOT_SIZE / 2 : SLOT_SIZE;
-    QByteArray preview = buildTiled512k();
-    QStringList relocateNotes;
-    relocateRomTagPointers(preview, effectiveSize, &relocateNotes);
-    for (const auto& n : relocateNotes) {
-        emit log(QString("Slot %1 preflight: %2").arg(m_bank).arg(n));
     }
 
     const auto issues = validatePartsForCurrentLayout();
