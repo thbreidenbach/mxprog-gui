@@ -23,6 +23,8 @@ Component catalogs now also include a `__rom_header` block (bytes before first R
 
 Component extraction now separates a valid trailing checksum longword into a dedicated `__rom_checksum` metadata component; this file is skipped during bank assembly because checksum is always recomputed for the final composed image.
 
+Component extraction also preserves inter-component byte gaps as `__rom_gap_*` metadata files, so reloading *all* exported files can reconstruct the original byte layout without missing space.
+
 File names are not written to flash; only raw bytes are programmed.
 
 ROM analysis/cataloging does **not** auto-populate GUI banks. Extracted component files are saved as `.bin` in canonical (non-swapped) byte order. For manual bank composition, `.rom` is swapped and `.bin` is kept canonical (no heuristics).
