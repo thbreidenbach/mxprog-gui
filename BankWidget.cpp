@@ -123,46 +123,12 @@ QByteArray BankWidget::swap16(const QByteArray& in) {
 
 
 
-int BankWidget::canonicalScore(const QByteArray& data) {
-    int score = 0;
-    if (data.size() >= 0x10) {
-        const quint16 w0 = readBe16(data, 0);
-        const quint16 w1 = readBe16(data, 2);
-        if (w0 == 0x4EF9 || w1 == 0x4EF9 || w1 == 0xFC00) score += 3;
-
-        const quint16 ver = readBe16(data, 0x0C);
-        if (ver >= 30 && ver <= 60) score += 2;
-    }
-
-    // RomTag signal density in canonical byte order.
-    int tags = 0;
-    for (int i = 0; i + 1 < data.size(); i += 2) {
-        if (readBe16(data, i) == 0x4AFC) {
-            ++tags;
-            if (tags >= 8) break;
-        }
-    }
-    score += qMin(tags, 6);
-
-    if (data.contains("exec.library") || data.contains("dos.library")) score += 2;
-
-    return score;
-}
-
-bool BankWidget::shouldAutoSwap(const QFileInfo& fi, const QByteArray& raw) {
+bool BankWidget::shouldAutoSwap(const QFileInfo& fi) {
     const QString ext = fi.suffix().toLower();
 
-    // .rom is historically word-swapped on disk for this workflow.
+    // Deterministic policy: .rom is swapped, .bin is canonical and stays unchanged.
     if (ext == "rom") return true;
-
-    // Catalogued/extracted components are stored as canonical .bin and must stay stable.
-    if (ext == "bin") return false;
-
-    // For non-.bin files, compare canonical plausibility of raw vs swapped view.
-    const QByteArray swapped = swap16(raw);
-    const int rawScore = canonicalScore(raw);
-    const int swappedScore = canonicalScore(swapped);
-    return swappedScore > rawScore;
+    return false;
 }
 
 quint32 BankWidget::readBe32(const QByteArray& in, int off) {
@@ -402,8 +368,13 @@ void BankWidget::addFiles() {
             QMessageBox::warning(this, "Open failed", fi.fileName()); continue;
         }
         QByteArray raw = f.readAll();
-        const bool autoSwap = shouldAutoSwap(fi, raw);
+        const bool autoSwap = shouldAutoSwap(fi);
         QByteArray data = autoSwap ? swap16(raw) : raw;
+        const QString ext = fi.suffix().toLower();
+        if (ext != "bin" && ext != "rom") {
+            emit log(QString("Slot %1 notice: treating %2 as canonical (no auto-swap).")
+                     .arg(m_bank).arg(fi.fileName()));
+        }
         if (data.size() > SLOT_SIZE) {
             QMessageBox::warning(this, "Too large",
                                  QString("%1 exceeds 512 KiB").arg(fi.fileName()));
@@ -444,8 +415,13 @@ void BankWidget::removeSelected() {
 }
 
 void BankWidget::doWriteSlot() {
-    if (ensureRomHeaderFirst()) {
-        emit log(QString("Slot %1: moved __rom_header to first position before write.").arg(m_bank));
+    const bool hadHeaderFirst = (!m_parts.isEmpty() && m_parts[0].name.contains("__rom_header", Qt::CaseInsensitive));
+    int execBefore = -1; for (int i = 0; i < m_parts.size(); ++i) { if (m_parts[i].name.contains("exec", Qt::CaseInsensitive)) { execBefore = i; break; } }
+    normalizeComponentOrder();
+    int execAfter = -1; for (int i = 0; i < m_parts.size(); ++i) { if (m_parts[i].name.contains("exec", Qt::CaseInsensitive)) { execAfter = i; break; } }
+    const bool hasHeaderFirst = (!m_parts.isEmpty() && m_parts[0].name.contains("__rom_header", Qt::CaseInsensitive));
+    if (hadHeaderFirst != hasHeaderFirst || execBefore != execAfter) {
+        emit log(QString("Slot %1: normalized component order (__rom_header first, exec early) before write.").arg(m_bank));
         refreshUi();
     }
 
@@ -530,6 +506,29 @@ bool BankWidget::ensureRomHeaderFirst() {
         return true;
     }
     return false;
+}
+
+void BankWidget::normalizeComponentOrder() {
+    if (m_parts.size() < 2) return;
+
+    ensureRomHeaderFirst();
+
+    int headerIdx = -1;
+    for (int i = 0; i < m_parts.size(); ++i) {
+        if (m_parts[i].name.contains("__rom_header", Qt::CaseInsensitive)) {
+            headerIdx = i;
+            break;
+        }
+    }
+
+    for (int i = 0; i < m_parts.size(); ++i) {
+        if (!m_parts[i].name.contains("exec", Qt::CaseInsensitive)) continue;
+        const int target = (headerIdx == 0) ? 1 : 0;
+        if (i == target) return;
+        RomPart exec = m_parts.takeAt(i);
+        m_parts.insert(target, std::move(exec));
+        return;
+    }
 }
 
 bool BankWidget::hasRomHeaderPart() const {

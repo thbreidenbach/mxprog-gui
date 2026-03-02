@@ -25,7 +25,7 @@ Component catalogs now also include a `__rom_header` block (bytes before first R
 
 File names are not written to flash; only raw bytes are programmed.
 
-ROM analysis/cataloging does **not** auto-populate GUI banks. Extracted component files are saved as `.bin` in canonical (non-swapped) byte order. For manual bank composition, `.rom` is always swapped, `.bin` is never auto-swapped, and non-`.bin` files use a content-based heuristic (raw vs swapped plausibility).
+ROM analysis/cataloging does **not** auto-populate GUI banks. Extracted component files are saved as `.bin` in canonical (non-swapped) byte order. For manual bank composition, `.rom` is swapped and `.bin` is kept canonical (no heuristics).
 
 The GUI includes most or all functions available in command line.
 
