@@ -175,41 +175,8 @@ QVector<ComponentInfo> scanComponentsWithBase(const QByteArray& rom, quint32 bas
         finalOut.push_back(std::move(header));
     }
 
-    int nonZeroCount = 0;
-    for (const auto& c : dedup) {
-        if (c.size > 0) ++nonZeroCount;
-    }
-
-    // Preserve inter-component gaps explicitly so a full roundtrip can reconstruct
-    // the exact original byte layout (header + gaps + components + trailer).
-    int cursor = (!dedup.isEmpty() && dedup[0].offset > 0) ? dedup[0].offset : 0;
-    for (const auto& c : dedup) {
-        if (c.size <= 0) continue;
-
-        if (c.offset > cursor) {
-            ComponentInfo gap;
-            gap.name = QString("__rom_gap_%1").arg(cursor, 6, 16, QLatin1Char('0'));
-            gap.offset = cursor;
-            gap.size = c.offset - cursor;
-            gap.data = rom.mid(gap.offset, gap.size);
-            gap.checksumSha256 = QCryptographicHash::hash(gap.data, QCryptographicHash::Sha256);
-            finalOut.push_back(std::move(gap));
-        }
-
-        finalOut.push_back(c);
-        cursor = qMax(cursor, c.offset + c.size);
-    }
-
-    // Preserve trailing non-component bytes as dedicated trailer metadata,
-    // but only if we actually detected at least one real component.
-    if (nonZeroCount > 0 && cursor < rom.size()) {
-        ComponentInfo trailer;
-        trailer.name = "__rom_trailer";
-        trailer.offset = cursor;
-        trailer.size = rom.size() - cursor;
-        trailer.data = rom.mid(trailer.offset, trailer.size);
-        trailer.checksumSha256 = QCryptographicHash::hash(trailer.data, QCryptographicHash::Sha256);
-        finalOut.push_back(std::move(trailer));
+    for (auto& c : dedup) {
+        if (c.size > 0) finalOut.push_back(std::move(c));
     }
 
     return finalOut;
@@ -244,6 +211,7 @@ void separateTrailingChecksum(QVector<ComponentInfo>& comps, const QByteArray& r
 
     int ownerIdx = -1;
     for (int i = 0; i < comps.size(); ++i) {
+        if (comps[i].name.startsWith("__rom_")) continue;
         const int start = comps[i].offset;
         const int end = comps[i].offset + comps[i].size;
         if (start <= checksumOff && checksumOff + 4 <= end) {
