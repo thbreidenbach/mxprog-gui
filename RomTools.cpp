@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QtGlobal>
 #include <algorithm>
 #include <cstdlib>
 
@@ -137,7 +138,18 @@ QVector<ComponentInfo> scanComponentsWithBase(const QByteArray& rom, quint32 bas
 
     for (int idx = 0; idx < dedup.size(); ++idx) {
         const int start = dedup[idx].offset;
-        const int end = (idx + 1 < dedup.size()) ? dedup[idx + 1].offset : rom.size();
+        const int nextStart = (idx + 1 < dedup.size()) ? dedup[idx + 1].offset : rom.size();
+
+        int end = nextStart;
+        const quint32 endSkipRaw = readBe32(rom, start + 6);
+        const quint32 endSkipNorm = normalizeAddress(endSkipRaw, baseAddr, rom.size());
+        if (endSkipNorm) {
+            const int endByTag = int(endSkipNorm - baseAddr);
+            if (endByTag > start && endByTag <= rom.size()) {
+                end = qMin(endByTag, nextStart);
+            }
+        }
+
         if (end <= start) {
             dedup[idx].size = 0;
             dedup[idx].data.clear();
@@ -163,9 +175,26 @@ QVector<ComponentInfo> scanComponentsWithBase(const QByteArray& rom, quint32 bas
         finalOut.push_back(std::move(header));
     }
 
+    int maxEnd = 0;
+    for (const auto& c : dedup) {
+        maxEnd = qMax(maxEnd, c.offset + c.size);
+    }
+
     for (auto& c : dedup) {
         if (c.size > 0) finalOut.push_back(std::move(c));
     }
+
+    // Preserve trailing non-component bytes as dedicated trailer metadata.
+    if (maxEnd < rom.size()) {
+        ComponentInfo trailer;
+        trailer.name = "__rom_trailer";
+        trailer.offset = maxEnd;
+        trailer.size = rom.size() - maxEnd;
+        trailer.data = rom.mid(trailer.offset, trailer.size);
+        trailer.checksumSha256 = QCryptographicHash::hash(trailer.data, QCryptographicHash::Sha256);
+        finalOut.push_back(std::move(trailer));
+    }
+
     return finalOut;
 }
 
@@ -196,22 +225,24 @@ void separateTrailingChecksum(QVector<ComponentInfo>& comps, const QByteArray& r
 
     const int checksumOff = rom.size() - 4;
 
-    int lastIdx = -1;
-    for (int i = comps.size() - 1; i >= 0; --i) {
-        if (comps[i].name == "__rom_header") continue;
-        lastIdx = i;
-        break;
+    int ownerIdx = -1;
+    for (int i = 0; i < comps.size(); ++i) {
+        const int start = comps[i].offset;
+        const int end = comps[i].offset + comps[i].size;
+        if (start <= checksumOff && checksumOff + 4 <= end) {
+            ownerIdx = i;
+        }
     }
-    if (lastIdx < 0) return;
+    if (ownerIdx < 0) return;
 
-    auto& last = comps[lastIdx];
-    const int lastEnd = last.offset + last.size;
-    if (lastEnd != rom.size() || last.size < 4) return;
+    auto& owner = comps[ownerIdx];
+    const int ownerEnd = owner.offset + owner.size;
+    if (ownerEnd != rom.size() || owner.size < 4) return;
 
-    // Detach trailing checksum longword from payload component.
-    last.size -= 4;
-    last.data = rom.mid(last.offset, last.size);
-    last.checksumSha256 = QCryptographicHash::hash(last.data, QCryptographicHash::Sha256);
+    // Detach trailing checksum longword from containing component/trailer.
+    owner.size -= 4;
+    owner.data = rom.mid(owner.offset, owner.size);
+    owner.checksumSha256 = QCryptographicHash::hash(owner.data, QCryptographicHash::Sha256);
 
     ComponentInfo checksum;
     checksum.name = "__rom_checksum";
@@ -221,7 +252,7 @@ void separateTrailingChecksum(QVector<ComponentInfo>& comps, const QByteArray& r
     checksum.checksumSha256 = QCryptographicHash::hash(checksum.data, QCryptographicHash::Sha256);
     comps.push_back(std::move(checksum));
 
-    if (warnings) warnings->push_back("Separated trailing ROM checksum longword into __rom_checksum metadata component.");
+    if (warnings) warnings->push_back("Separated trailing ROM checksum longword into __rom_checksum metadata component (removed from payload/trailer).");
 }
 
 } // namespace
