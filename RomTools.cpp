@@ -179,6 +179,51 @@ QVector<ComponentInfo> bestScan(const QByteArray& rom) {
     return best;
 }
 
+
+
+bool hasValidKickChecksum(const QByteArray& rom) {
+    if (rom.size() < 4 || (rom.size() % 4) != 0) return false;
+
+    quint64 sum = 0;
+    for (int off = 0; off < rom.size(); off += 4) {
+        sum += readBe32(rom, off);
+    }
+    return (quint32(sum & 0xFFFFFFFFu) == 0xFFFFFFFFu);
+}
+
+void separateTrailingChecksum(QVector<ComponentInfo>& comps, const QByteArray& rom, QStringList* warnings) {
+    if (comps.isEmpty() || rom.size() < 4 || !hasValidKickChecksum(rom)) return;
+
+    const int checksumOff = rom.size() - 4;
+
+    int lastIdx = -1;
+    for (int i = comps.size() - 1; i >= 0; --i) {
+        if (comps[i].name == "__rom_header") continue;
+        lastIdx = i;
+        break;
+    }
+    if (lastIdx < 0) return;
+
+    auto& last = comps[lastIdx];
+    const int lastEnd = last.offset + last.size;
+    if (lastEnd != rom.size() || last.size < 4) return;
+
+    // Detach trailing checksum longword from payload component.
+    last.size -= 4;
+    last.data = rom.mid(last.offset, last.size);
+    last.checksumSha256 = QCryptographicHash::hash(last.data, QCryptographicHash::Sha256);
+
+    ComponentInfo checksum;
+    checksum.name = "__rom_checksum";
+    checksum.offset = checksumOff;
+    checksum.size = 4;
+    checksum.data = rom.mid(checksumOff, 4);
+    checksum.checksumSha256 = QCryptographicHash::hash(checksum.data, QCryptographicHash::Sha256);
+    comps.push_back(std::move(checksum));
+
+    if (warnings) warnings->push_back("Separated trailing ROM checksum longword into __rom_checksum metadata component.");
+}
+
 } // namespace
 
 QByteArray swap16(const QByteArray& in) {
@@ -278,6 +323,10 @@ QVector<ComponentInfo> extractComponents(const QByteArray& canonicalRom, QString
 
     if (warnings && out.isEmpty()) {
         warnings->push_back("No ROM components detected via RomTag scan (Romsplit-compatible tagging not found). It may be a plain monolithic image without resident tags.");
+    }
+
+    if (!out.isEmpty()) {
+        separateTrailingChecksum(out, canonicalRom, warnings);
     }
 
     return out;

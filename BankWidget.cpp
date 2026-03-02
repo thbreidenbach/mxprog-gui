@@ -368,6 +368,11 @@ void BankWidget::addFiles() {
             QMessageBox::warning(this, "Open failed", fi.fileName()); continue;
         }
         QByteArray raw = f.readAll();
+        if (fi.fileName().contains("__rom_checksum", Qt::CaseInsensitive)) {
+            emit log(QString("Slot %1: skipping %2 (derived checksum metadata; recomputed on write).")
+                     .arg(m_bank).arg(fi.fileName()));
+            continue;
+        }
         const bool autoSwap = shouldAutoSwap(fi);
         QByteArray data = autoSwap ? swap16(raw) : raw;
         const QString ext = fi.suffix().toLower();
