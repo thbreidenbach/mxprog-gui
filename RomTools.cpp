@@ -176,16 +176,21 @@ QVector<ComponentInfo> scanComponentsWithBase(const QByteArray& rom, quint32 bas
     }
 
     int maxEnd = 0;
+    int nonZeroCount = 0;
     for (const auto& c : dedup) {
-        maxEnd = qMax(maxEnd, c.offset + c.size);
+        if (c.size > 0) {
+            ++nonZeroCount;
+            maxEnd = qMax(maxEnd, c.offset + c.size);
+        }
     }
 
     for (auto& c : dedup) {
         if (c.size > 0) finalOut.push_back(std::move(c));
     }
 
-    // Preserve trailing non-component bytes as dedicated trailer metadata.
-    if (maxEnd < rom.size()) {
+    // Preserve trailing non-component bytes as dedicated trailer metadata,
+    // but only if we actually detected at least one real component.
+    if (nonZeroCount > 0 && maxEnd < rom.size()) {
         ComponentInfo trailer;
         trailer.name = "__rom_trailer";
         trailer.offset = maxEnd;
