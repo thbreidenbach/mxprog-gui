@@ -155,14 +155,14 @@ bool BankWidget::shouldAutoSwap(const QFileInfo& fi, const QByteArray& raw) {
     // .rom is historically word-swapped on disk for this workflow.
     if (ext == "rom") return true;
 
-    // Compare canonical plausibility of raw vs swapped view to avoid wrong default swapping.
+    // Catalogued/extracted components are stored as canonical .bin and must stay stable.
+    if (ext == "bin") return false;
+
+    // For non-.bin files, compare canonical plausibility of raw vs swapped view.
     const QByteArray swapped = swap16(raw);
     const int rawScore = canonicalScore(raw);
     const int swappedScore = canonicalScore(swapped);
-
-    // Keep .bin stable unless swapped view is significantly more plausible.
-    const int threshold = (ext == "bin") ? 3 : 1;
-    return (swappedScore - rawScore) >= threshold;
+    return swappedScore > rawScore;
 }
 
 quint32 BankWidget::readBe32(const QByteArray& in, int off) {
@@ -424,9 +424,6 @@ void BankWidget::addFiles() {
 
         emit log(QString("Added to Slot %1: %2 (%3 KiB)")
                  .arg(m_bank).arg(fi.fileName() + (autoSwap ? " [swap16]" : "")).arg(data.size()/1024));
-        if (fi.suffix().compare("bin", Qt::CaseInsensitive) == 0 && autoSwap) {
-            emit log(QString("Slot %1 notice: .bin was auto-swapped due to content heuristic.").arg(m_bank));
-        }
 
         const int halfBank = SLOT_SIZE / 2;
         if (beforeBytes <= halfBank && usedBytes() > halfBank) {
