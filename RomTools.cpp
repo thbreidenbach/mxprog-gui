@@ -206,6 +206,17 @@ bool hasValidKickChecksum(const QByteArray& rom) {
 }
 
 
+int detectEffectiveKickSize(const QByteArray& image) {
+    if (image.size() == 256 * 1024) return 256 * 1024;
+    if (image.size() == 512 * 1024) {
+        const QByteArray first = image.left(256 * 1024);
+        const QByteArray second = image.mid(256 * 1024, 256 * 1024);
+        if (first == second) return 256 * 1024;
+        return 512 * 1024;
+    }
+    return 0;
+}
+
 void finalizeKickChecksum(QByteArray& image, int effectiveSize) {
     if (effectiveSize <= 0 || effectiveSize > image.size() || (effectiveSize % 4) != 0) return;
 
@@ -522,12 +533,18 @@ bool rebuildFromCatalog(const QString& catalogPath,
         std::copy_n(data.constData(), writeLen, image.data() + offset);
     }
 
-    // Recompute checksum in canonical image space.
-    if ((image.size() == 256 * 1024 || image.size() == 512 * 1024) && (image.size() % 4 == 0)) {
-        finalizeKickChecksum(image, image.size());
-    } else if (image.size() > 0 && (image.size() % 4 == 0)) {
-        // For other valid aligned sizes, still finalize on full canonical range.
-        finalizeKickChecksum(image, image.size());
+    // Recompute checksum using effective Kickstart size semantics:
+    // - 256 KiB image: checksum at 256 KiB tail
+    // - 512 KiB image: if mirrored halves, checksum is still 256 KiB-based; otherwise 512 KiB
+    const int effectiveKickSize = detectEffectiveKickSize(image);
+    if (effectiveKickSize > 0 && (effectiveKickSize % 4) == 0) {
+        finalizeKickChecksum(image, effectiveKickSize);
+        if (effectiveKickSize == 256 * 1024 && image.size() == 512 * 1024) {
+            // Keep mirrored representation deterministic after checksum update.
+            image.replace(256 * 1024, 256 * 1024, image.left(256 * 1024));
+        }
+    } else if (warnings) {
+        warnings->push_back(QString("Skipped checksum finalize for non-Kickstart size: %1 bytes").arg(image.size()));
     }
 
     *outCanonicalRom = std::move(image);

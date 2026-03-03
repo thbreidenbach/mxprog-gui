@@ -21,6 +21,8 @@ A new **Import/Analyze ROM** action can inspect a ROM, run sanity checks (includ
 
 A new **Rebuild ROM from Catalog…** action can rebuild a canonical ROM image from `catalog.json` + extracted component files and writes a fresh checksum for the rebuilt image.
 
+Rebuild-from-catalog checksum finalization now follows effective Kickstart size semantics: mirrored 512 KiB images are finalized as 256 KiB (then mirrored), while linear 512 KiB images are finalized over full 512 KiB.
+
 Component catalogs now also include a `__rom_header` block (bytes before first RomTag) to keep ROM vectors/startup prelude available for reassembly.
 
 Component extraction now separates a valid trailing checksum longword into a dedicated `__rom_checksum` metadata component; this file is skipped during bank assembly because checksum is always recomputed for the final composed image.
