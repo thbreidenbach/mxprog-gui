@@ -77,7 +77,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         barLayout->addWidget(b);
         m_banks.push_back(b);
         connect(b, &BankWidget::requestWriteSlot, this, &MainWindow::writeSlot);
-        connect(b, &BankWidget::log, [this](const QString& s){ m_log->appendPlainText(s); });
+        connect(b, &BankWidget::log, this, [this](const QString& s){ if (m_log) m_log->appendPlainText(s); });
     }
     auto* barInner = new QWidget();
     barInner->setLayout(barLayout);
