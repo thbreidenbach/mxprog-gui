@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "RomTools.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -8,6 +9,7 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QtSerialPort/QSerialPortInfo>
 #include <QMessageBox>
 #include <QProcessEnvironment>
@@ -75,7 +77,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         barLayout->addWidget(b);
         m_banks.push_back(b);
         connect(b, &BankWidget::requestWriteSlot, this, &MainWindow::writeSlot);
-        connect(b, &BankWidget::log, [this](const QString& s){ m_log->appendPlainText(s); });
+        connect(b, &BankWidget::log, this, [this](const QString& s){ if (m_log) m_log->appendPlainText(s); });
     }
     auto* barInner = new QWidget();
     barInner->setLayout(barLayout);
@@ -92,6 +94,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* actions = new QHBoxLayout();
     auto* btnWriteAll = new QPushButton("Write All (monolithic)", this);
     auto* btnSaveAll  = new QPushButton("Save 2 MiB Buffer…", this);
+    auto* btnImportRom = new QPushButton("Import/Analyze ROM…", this);
+    auto* btnRebuild = new QPushButton("Rebuild ROM from Catalog…", this);
+    actions->addWidget(btnImportRom);
+    actions->addWidget(btnRebuild);
     actions->addWidget(btnSaveAll);
     actions->addStretch();
     actions->addWidget(btnWriteAll);
@@ -99,6 +105,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(btnWriteAll, &QPushButton::clicked, this, &MainWindow::writeAllMonolithic);
     connect(btnSaveAll,  &QPushButton::clicked, this, &MainWindow::saveMonolithic);
+    connect(btnImportRom,&QPushButton::clicked, this, &MainWindow::importRomAndCatalog);
+    connect(btnRebuild,  &QPushButton::clicked, this, &MainWindow::rebuildFromCatalog);
 
     // Device actions
     auto* devBox = new QHBoxLayout();
@@ -476,3 +484,85 @@ void MainWindow::readDump() {
     enqueue(QStringList() << "-r" << path << "-l" << QString::number(TOTAL_BYTES), "read", true, 240'000);
 }
 void MainWindow::terminal()  { enqueue(QStringList() << "-t", "term", true, 0); /* kein Timeout im Terminal */ }
+
+
+void MainWindow::importRomAndCatalog() {
+    const QString source = QFileDialog::getOpenFileName(this, "Import ROM", QString(),
+        "ROM/Binary (*.bin *.rom);;All (*.*)");
+    if (source.isEmpty()) return;
+
+    auto meta = RomTools::inspectRom(source);
+    if (!meta.validSize) {
+        QMessageBox::warning(this, "Invalid ROM",
+                             QString("The selected ROM is invalid.\n%1")
+                                 .arg(meta.warnings.join("\n")));
+        m_log->appendPlainText("Import rejected: " + source);
+        return;
+    }
+
+    const auto slices = RomTools::splitIntoBanks(meta.padded2MiB);
+    if (slices.size() != 4) {
+        QMessageBox::warning(this, "Split failed", "Could not split ROM into 4 banks.");
+        return;
+    }
+
+    QStringList componentWarnings;
+    const auto components = RomTools::extractComponents(meta.canonicalData, &componentWarnings);
+    for (const auto& w : componentWarnings) {
+        meta.warnings << w;
+    }
+
+    const QString baseName = QFileInfo(source).completeBaseName();
+    const QString defDir = QDir(QFileInfo(source).absolutePath()).filePath(baseName + "_catalog");
+    const QString outDir = QFileDialog::getExistingDirectory(this, "Select output folder for ROM catalog", defDir);
+    if (outDir.isEmpty()) return;
+
+    QString error;
+    if (!RomTools::writeCatalog(outDir, meta, slices, components, &error)) {
+        QMessageBox::critical(this, "Catalog write failed", error);
+        return;
+    }
+
+    m_log->appendPlainText(QString("Analyzed ROM: %1").arg(source));
+    m_log->appendPlainText(QString("SHA256 (2MiB): %1").arg(QString::fromLatin1(RomTools::toHex(meta.checksumSha256))));
+    for (const auto& warning : meta.warnings) {
+        m_log->appendPlainText("Sanity: " + warning);
+    }
+    m_log->appendPlainText(QString("Detected ROM components: %1").arg(components.size()));
+    m_log->appendPlainText("Catalog stored in: " + outDir);
+    m_log->appendPlainText("Note: Banks were not modified by ROM analysis.");
+}
+
+
+void MainWindow::rebuildFromCatalog() {
+    const QString catalogPath = QFileDialog::getOpenFileName(this,
+        "Open catalog.json", QString(), "Catalog JSON (catalog.json *.json);;All (*.*)");
+    if (catalogPath.isEmpty()) return;
+
+    QByteArray rebuilt;
+    QStringList warnings;
+    QString error;
+    if (!RomTools::rebuildFromCatalog(catalogPath, &rebuilt, &warnings, &error)) {
+        QMessageBox::critical(this, "Rebuild failed", error);
+        return;
+    }
+
+    QString outPath = QFileDialog::getSaveFileName(this,
+        "Save rebuilt canonical ROM", QFileInfo(catalogPath).absolutePath() + "/rebuilt_from_catalog.bin",
+        "Binary (*.bin);;All (*.*)");
+    if (outPath.isEmpty()) return;
+
+    QFile f(outPath);
+    if (!f.open(QIODevice::WriteOnly)) {
+        QMessageBox::warning(this, "Save failed", outPath);
+        return;
+    }
+    f.write(rebuilt);
+    f.close();
+
+    m_log->appendPlainText(QString("Rebuilt canonical ROM from catalog: %1").arg(catalogPath));
+    m_log->appendPlainText(QString("Saved rebuilt ROM: %1 (%2 KiB)").arg(outPath).arg(rebuilt.size() / 1024));
+    for (const auto& w : warnings) {
+        m_log->appendPlainText("Rebuild warning: " + w);
+    }
+}

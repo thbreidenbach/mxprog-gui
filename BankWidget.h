@@ -4,6 +4,9 @@
 #include <QByteArray>
 #include <QVector>
 #include <QPushButton>
+#include <QFileInfo>
+#include <QStringList>
+#include <QtGlobal>
 
 struct RomPart {
     QString     name;
@@ -33,8 +36,9 @@ public:
 
     int bank() const { return m_bank; }
     int usedBytes() const;
-    QByteArray buildTiled512k() const;   // Kachelt bis exakt 512 KiB; leer -> 0xFF
+    QByteArray buildTiled512k() const;   // <=256KiB: auf 256KiB auffüllen+spiegeln; >256KiB: auf 512KiB mit 0xFF
     void clear();
+    void loadSinglePart(const QString& name, const QByteArray& data, bool swapped = false);
 
 signals:
     void requestWriteSlot(int bank, const QByteArray& img512k);
@@ -47,7 +51,20 @@ public slots:
 
 private:
     static QByteArray swap16(const QByteArray& in);
+    static bool shouldAutoSwap(const QFileInfo& fi);
+    static quint32 readBe32(const QByteArray& in, int off);
+    static quint16 readBe16(const QByteArray& in, int off);
+    static void writeBe32(QByteArray& out, int off, quint32 v);
+    static void finalizeKickstartChecksum(QByteArray& image, int effectiveSize);
+    static bool looksLikeKickstartHeader(const QByteArray& image, int effectiveSize);
+    static QStringList validateRomTags(const QByteArray& image, int effectiveSize);
+    QStringList validatePartRomTags(int effectiveSize) const;
+    QStringList validatePartsForCurrentLayout() const;
+    bool ensureRomHeaderFirst();
+    void normalizeComponentOrder();
+    bool hasRomHeaderPart() const;
     void refreshUi();
+    void updateWriteButtonState();
 
     int m_bank;
     QListWidget* m_list;
