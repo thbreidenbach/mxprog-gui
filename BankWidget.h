@@ -66,6 +66,10 @@ private:
     QStringList validatePartRomTags(int effectiveSize) const;
     QStringList validatePartsForCurrentLayout() const;
     bool ensureRomHeaderFirst();
+    QStringList validatePartRomTags(int effectiveSize) const;
+    QStringList validatePartsForCurrentLayout() const;
+    bool ensureRomHeaderFirst();
+    void normalizeComponentOrder();
     bool hasRomHeaderPart() const;
     void refreshUi();
     void updateWriteButtonState();

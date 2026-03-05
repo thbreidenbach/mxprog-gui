@@ -75,6 +75,31 @@ void MeterBar::paintEvent(QPaintEvent*) {
         }
     }
 
+    }
+
+    // Middle marker at 256 KiB.
+    p.setPen(QPen(QColor("#111827"), 2));
+    p.drawLine(xMid, 0, xMid, H - 1);
+
+    // Visual mode hints:
+    // - <=256 KiB: mirrored area in upper half of bank is highlighted.
+    // - >256 KiB: overflow area (256..used) is hatched as warning.
+    if (consumed > 0 && consumed <= halfBytes) {
+        const int mirrorEnd = qBound(xMid, int((qint64(halfBytes + consumed) * W) / total), W);
+        const int mirrorW = qMax(0, mirrorEnd - xMid);
+        if (mirrorW > 0) {
+            QBrush mirrorBrush(QColor(59, 130, 246, 70), Qt::Dense6Pattern);
+            p.fillRect(QRect(xMid, 0, mirrorW, H), mirrorBrush);
+        }
+    } else if (consumed > halfBytes) {
+        const int overflowEnd = qBound(xMid, int((qint64(consumed) * W) / total), W);
+        const int overflowW = qMax(0, overflowEnd - xMid);
+        if (overflowW > 0) {
+            QBrush warnBrush(QColor(220, 38, 38, 90), Qt::BDiagPattern);
+            p.fillRect(QRect(xMid, 0, overflowW, H), warnBrush);
+        }
+    }
+
     p.setPen(Qt::black);
     p.drawRect(rect().adjusted(0, 0, -1, -1));
 }
@@ -159,6 +184,8 @@ bool BankWidget::hasCanonicalSignatures(const QByteArray& data) {
         if (readBe16(data, off) == 0x4AFC) return true;
     }
 
+    // Deterministic policy: .rom is swapped, .bin is canonical and stays unchanged.
+    if (ext == "rom") return true;
     return false;
 }
 
@@ -483,6 +510,20 @@ int BankWidget::relocateRomTags(QByteArray& image, int effectiveSize) {
     return patched;
 }
 
+    // Henne-Ei safe: checksum slot is treated as 0 during summation,
+    // then filled with the additive inverse so global sum becomes 0xFFFFFFFF.
+    const int checksumOff = effectiveSize - 4;
+    writeBe32(image, checksumOff, 0);
+
+    quint64 sum = 0;
+    for (int off = 0; off < effectiveSize; off += 4) {
+        sum += readBe32(image, off);
+    }
+    const quint32 partial = quint32(sum & 0xFFFFFFFFu);
+    const quint32 checksum = quint32((0x100000000ULL - partial) & 0xFFFFFFFFu);
+    writeBe32(image, checksumOff, checksum);
+}
+
 QByteArray BankWidget::buildTiled512k() const {
     if (m_parts.isEmpty()) {
         return QByteArray(SLOT_SIZE, char(0xff));
@@ -581,6 +622,25 @@ QByteArray BankWidget::buildTiled512k() const {
             finalizeKickstartChecksum(half, HALF_BANK);
         }
 
+
+    if (base.isEmpty()) {
+        return QByteArray(SLOT_SIZE, char(0xff));
+    }
+
+    static const int HALF_BANK = SLOT_SIZE / 2; // 256 KiB
+
+    // For <= 256 KiB payloads, build a 256 KiB image and mirror it to 512 KiB.
+    // This keeps classic 256 KiB ROM layout compatible in a 512 KiB bank.
+    if (base.size() <= HALF_BANK) {
+        QByteArray half = base.left(HALF_BANK);
+        if (half.size() < HALF_BANK) {
+            half.append(QByteArray(HALF_BANK - half.size(), char(0xff)));
+        }
+
+        if (looksLikeKickstartHeader(half, HALF_BANK) || hasRomHeaderPart()) {
+            finalizeKickstartChecksum(half, HALF_BANK);
+        }
+
         QByteArray out;
         out.reserve(SLOT_SIZE);
         out.append(half);
@@ -588,6 +648,7 @@ QByteArray BankWidget::buildTiled512k() const {
         return out;
     }
 
+    // > 256 KiB: keep linear layout and pad up to full 512 KiB bank.
     if (base.size() < SLOT_SIZE) {
         base.append(QByteArray(SLOT_SIZE - base.size(), char(0xff)));
     }
@@ -595,6 +656,8 @@ QByteArray BankWidget::buildTiled512k() const {
     QByteArray out = base.left(SLOT_SIZE);
     relocateRomTags(out, SLOT_SIZE);
     if (looksLikeKickstartHeader(out, SLOT_SIZE)) {
+
+    if (looksLikeKickstartHeader(out, SLOT_SIZE) || hasRomHeaderPart()) {
         finalizeKickstartChecksum(out, SLOT_SIZE);
     }
     return out;
@@ -674,6 +737,18 @@ void BankWidget::addFiles() {
             }
         }
 
+        if (fi.fileName().contains("__rom_checksum", Qt::CaseInsensitive)) {
+            emit log(QString("Slot %1: skipping %2 (derived checksum metadata; recomputed on write).")
+                     .arg(m_bank).arg(fi.fileName()));
+            continue;
+        }
+        const bool autoSwap = shouldAutoSwap(fi);
+        QByteArray data = autoSwap ? swap16(raw) : raw;
+        const QString ext = fi.suffix().toLower();
+        if (ext != "bin" && ext != "rom") {
+            emit log(QString("Slot %1 notice: treating %2 as canonical (no auto-swap).")
+                     .arg(m_bank).arg(fi.fileName()));
+        }
         if (data.size() > SLOT_SIZE) {
             QMessageBox::warning(this, "Too large",
                                  QString("%1 exceeds 512 KiB").arg(fi.fileName()));
@@ -706,6 +781,10 @@ void BankWidget::addFiles() {
                  .arg(data.size()/1024)
                  .arg(partAddr, 6, 16, QLatin1Char('0'))
                  .arg(hexPrefix.trimmed()));
+        m_parts.push_back(std::move(part));
+
+        emit log(QString("Added to Slot %1: %2 (%3 KiB)")
+                 .arg(m_bank).arg(fi.fileName() + (autoSwap ? " [swap16]" : "")).arg(data.size()/1024));
 
         const int halfBank = SLOT_SIZE / 2;
         if (beforeBytes <= halfBank && usedBytes() > halfBank) {
@@ -761,6 +840,23 @@ void BankWidget::doWriteSlot() {
         }
     } else if (m_parts.size() > 1) {
         emit log(QString("Slot %1 diag: using CONCATENATION fallback (gap-fill not possible)")
+    const bool hadHeaderFirst = (!m_parts.isEmpty() && m_parts[0].name.contains("__rom_header", Qt::CaseInsensitive));
+    int execBefore = -1; for (int i = 0; i < m_parts.size(); ++i) { if (m_parts[i].name.contains("exec", Qt::CaseInsensitive)) { execBefore = i; break; } }
+    normalizeComponentOrder();
+    int execAfter = -1; for (int i = 0; i < m_parts.size(); ++i) { if (m_parts[i].name.contains("exec", Qt::CaseInsensitive)) { execAfter = i; break; } }
+    const bool hasHeaderFirst = (!m_parts.isEmpty() && m_parts[0].name.contains("__rom_header", Qt::CaseInsensitive));
+    if (hadHeaderFirst != hasHeaderFirst || execBefore != execAfter) {
+        emit log(QString("Slot %1: normalized component order (__rom_header first, exec early) before write.").arg(m_bank));
+        refreshUi();
+    }
+
+    const auto issues = validatePartsForCurrentLayout();
+    for (const auto& issue : issues) {
+        emit log(QString("Slot %1 preflight: %2").arg(m_bank).arg(issue));
+    }
+
+    if (!hasRomHeaderPart()) {
+        emit log(QString("Slot %1 notice: no __rom_header part detected. Header/vectors may be incomplete for modified Kickstart ROMs.")
                  .arg(m_bank));
     }
 
@@ -876,6 +972,29 @@ bool BankWidget::ensureRomHeaderFirst() {
         return true;
     }
     return false;
+}
+
+void BankWidget::normalizeComponentOrder() {
+    if (m_parts.size() < 2) return;
+
+    ensureRomHeaderFirst();
+
+    int headerIdx = -1;
+    for (int i = 0; i < m_parts.size(); ++i) {
+        if (m_parts[i].name.contains("__rom_header", Qt::CaseInsensitive)) {
+            headerIdx = i;
+            break;
+        }
+    }
+
+    for (int i = 0; i < m_parts.size(); ++i) {
+        if (!m_parts[i].name.contains("exec", Qt::CaseInsensitive)) continue;
+        const int target = (headerIdx == 0) ? 1 : 0;
+        if (i == target) return;
+        RomPart exec = m_parts.takeAt(i);
+        m_parts.insert(target, std::move(exec));
+        return;
+    }
 }
 
 bool BankWidget::hasRomHeaderPart() const {

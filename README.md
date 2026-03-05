@@ -24,6 +24,17 @@ Component catalogs now also include a `__rom_header` block (bytes before first R
 File names are not written to flash; only raw bytes are programmed.
 
 ROM analysis/cataloging does **not** auto-populate GUI banks. Extracted component files are saved as `.bin` in canonical (non-swapped) byte order. For manual bank composition, `.bin` is kept as-is, while all non-`.bin` inputs (`.rom`, `.library`, `.device`, extensionless files, etc.) are byte-swapped on-the-fly before being placed in a bank.
+A new **Rebuild ROM from Catalog…** action can rebuild a canonical ROM image from `catalog.json` + extracted component files and writes a fresh checksum for the rebuilt image.
+
+Rebuild-from-catalog checksum finalization now follows effective Kickstart size semantics: mirrored 512 KiB images are finalized as 256 KiB (then mirrored), while linear 512 KiB images are finalized over full 512 KiB.
+
+Component catalogs now also include a `__rom_header` block (bytes before first RomTag) to keep ROM vectors/startup prelude available for reassembly.
+
+Component extraction now separates a valid trailing checksum longword into a dedicated `__rom_checksum` metadata component; this file is skipped during bank assembly because checksum is always recomputed for the final composed image.
+
+File names are not written to flash; only raw bytes are programmed.
+
+ROM analysis/cataloging does **not** auto-populate GUI banks. Extracted component files are saved as `.bin` in canonical (non-swapped) byte order. For manual bank composition, `.rom` is swapped and `.bin` is kept canonical (no heuristics).
 
 The GUI includes most or all functions available in command line.
 

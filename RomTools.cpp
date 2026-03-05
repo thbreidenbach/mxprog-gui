@@ -7,6 +7,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonValue>
+#include <QtGlobal>
 #include <algorithm>
 #include <cstdlib>
 
@@ -138,6 +140,18 @@ QVector<ComponentInfo> scanComponentsWithBase(const QByteArray& rom, quint32 bas
     for (int idx = 0; idx < dedup.size(); ++idx) {
         const int start = dedup[idx].offset;
         const int end = (idx + 1 < dedup.size()) ? dedup[idx + 1].offset : rom.size();
+        const int nextStart = (idx + 1 < dedup.size()) ? dedup[idx + 1].offset : rom.size();
+
+        int end = nextStart;
+        const quint32 endSkipRaw = readBe32(rom, start + 6);
+        const quint32 endSkipNorm = normalizeAddress(endSkipRaw, baseAddr, rom.size());
+        if (endSkipNorm) {
+            const int endByTag = int(endSkipNorm - baseAddr);
+            if (endByTag > start && endByTag <= rom.size()) {
+                end = qMin(endByTag, nextStart);
+            }
+        }
+
         if (end <= start) {
             dedup[idx].size = 0;
             dedup[idx].data.clear();
@@ -166,6 +180,7 @@ QVector<ComponentInfo> scanComponentsWithBase(const QByteArray& rom, quint32 bas
     for (auto& c : dedup) {
         if (c.size > 0) finalOut.push_back(std::move(c));
     }
+
     return finalOut;
 }
 
@@ -177,6 +192,88 @@ QVector<ComponentInfo> bestScan(const QByteArray& rom) {
         if (curr.size() > best.size()) best = std::move(curr);
     }
     return best;
+}
+
+
+
+bool hasValidKickChecksum(const QByteArray& rom) {
+    if (rom.size() < 4 || (rom.size() % 4) != 0) return false;
+
+    quint64 sum = 0;
+    for (int off = 0; off < rom.size(); off += 4) {
+        sum += readBe32(rom, off);
+    }
+    return (quint32(sum & 0xFFFFFFFFu) == 0xFFFFFFFFu);
+}
+
+
+int detectEffectiveKickSize(const QByteArray& image) {
+    if (image.size() == 256 * 1024) return 256 * 1024;
+    if (image.size() == 512 * 1024) {
+        const QByteArray first = image.left(256 * 1024);
+        const QByteArray second = image.mid(256 * 1024, 256 * 1024);
+        if (first == second) return 256 * 1024;
+        return 512 * 1024;
+    }
+    return 0;
+}
+
+void finalizeKickChecksum(QByteArray& image, int effectiveSize) {
+    if (effectiveSize <= 0 || effectiveSize > image.size() || (effectiveSize % 4) != 0) return;
+
+    const int checksumOff = effectiveSize - 4;
+    image[checksumOff + 0] = 0;
+    image[checksumOff + 1] = 0;
+    image[checksumOff + 2] = 0;
+    image[checksumOff + 3] = 0;
+
+    quint64 sum = 0;
+    for (int off = 0; off < effectiveSize; off += 4) {
+        sum += readBe32(image, off);
+    }
+    const quint32 partial = quint32(sum & 0xFFFFFFFFu);
+    const quint32 checksum = quint32((0x100000000ULL - partial) & 0xFFFFFFFFu);
+
+    image[checksumOff + 0] = char((checksum >> 24) & 0xff);
+    image[checksumOff + 1] = char((checksum >> 16) & 0xff);
+    image[checksumOff + 2] = char((checksum >> 8) & 0xff);
+    image[checksumOff + 3] = char(checksum & 0xff);
+}
+
+void separateTrailingChecksum(QVector<ComponentInfo>& comps, const QByteArray& rom, QStringList* warnings) {
+    if (comps.isEmpty() || rom.size() < 4 || !hasValidKickChecksum(rom)) return;
+
+    const int checksumOff = rom.size() - 4;
+
+    int ownerIdx = -1;
+    for (int i = 0; i < comps.size(); ++i) {
+        if (comps[i].name.startsWith("__rom_")) continue;
+        const int start = comps[i].offset;
+        const int end = comps[i].offset + comps[i].size;
+        if (start <= checksumOff && checksumOff + 4 <= end) {
+            ownerIdx = i;
+        }
+    }
+    if (ownerIdx < 0) return;
+
+    auto& owner = comps[ownerIdx];
+    const int ownerEnd = owner.offset + owner.size;
+    if (ownerEnd != rom.size() || owner.size < 4) return;
+
+    // Detach trailing checksum longword from containing component/trailer.
+    owner.size -= 4;
+    owner.data = rom.mid(owner.offset, owner.size);
+    owner.checksumSha256 = QCryptographicHash::hash(owner.data, QCryptographicHash::Sha256);
+
+    ComponentInfo checksum;
+    checksum.name = "__rom_checksum";
+    checksum.offset = checksumOff;
+    checksum.size = 4;
+    checksum.data = rom.mid(checksumOff, 4);
+    checksum.checksumSha256 = QCryptographicHash::hash(checksum.data, QCryptographicHash::Sha256);
+    comps.push_back(std::move(checksum));
+
+    if (warnings) warnings->push_back("Separated trailing ROM checksum longword into __rom_checksum metadata component (removed from payload/trailer).");
 }
 
 } // namespace
@@ -243,6 +340,7 @@ RomMeta inspectRom(const QString& path) {
         }
         // else: keep extension-based heuristic
     }
+    meta.alreadyByteswapped = fi.suffix().compare("rom", Qt::CaseInsensitive) == 0;
     meta.canonicalData = meta.alreadyByteswapped ? swap16(raw) : raw;
 
     if (meta.canonicalData.size() < SLOT_SIZE) {
@@ -297,6 +395,9 @@ QVector<ComponentInfo> extractComponents(const QByteArray& canonicalRom, QString
             // component payloads from the correct byte order.
             for (auto& c : fallback) {
                 c.data = swapped.mid(c.offset, c.size);
+            // Important: always export canonical byte order component payloads.
+            for (auto& c : fallback) {
+                c.data = canonicalRom.mid(c.offset, c.size);
                 c.checksumSha256 = QCryptographicHash::hash(c.data, QCryptographicHash::Sha256);
             }
             out = std::move(fallback);
@@ -305,6 +406,10 @@ QVector<ComponentInfo> extractComponents(const QByteArray& canonicalRom, QString
 
     if (warnings && out.isEmpty()) {
         warnings->push_back("No ROM components detected via RomTag scan (Romsplit-compatible tagging not found). It may be a plain monolithic image without resident tags.");
+    }
+
+    if (!out.isEmpty()) {
+        separateTrailingChecksum(out, canonicalRom, warnings);
     }
 
     return out;
@@ -398,6 +503,83 @@ bool writeCatalog(const QString& outDir,
     catalog.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
     catalog.close();
 
+    return true;
+}
+
+
+bool rebuildFromCatalog(const QString& catalogPath,
+                        QByteArray* outCanonicalRom,
+                        QStringList* warnings,
+                        QString* error) {
+    if (!outCanonicalRom) {
+        if (error) *error = "Output buffer is null.";
+        return false;
+    }
+
+    QFile catalogFile(catalogPath);
+    if (!catalogFile.open(QIODevice::ReadOnly)) {
+        if (error) *error = QString("Could not open catalog: %1").arg(catalogPath);
+        return false;
+    }
+
+    QJsonParseError pe;
+    const auto doc = QJsonDocument::fromJson(catalogFile.readAll(), &pe);
+    if (pe.error != QJsonParseError::NoError || !doc.isObject()) {
+        if (error) *error = QString("Invalid catalog JSON: %1").arg(pe.errorString());
+        return false;
+    }
+
+    const QJsonObject root = doc.object();
+    const int canonicalSize = root.value("canonicalSize").toInt();
+    if (canonicalSize <= 0 || canonicalSize > TOTAL_BYTES) {
+        if (error) *error = QString("Invalid canonicalSize in catalog: %1").arg(canonicalSize);
+        return false;
+    }
+
+    QByteArray image(canonicalSize, char(0xff));
+
+    const QDir baseDir = QFileInfo(catalogPath).absoluteDir();
+    const QJsonArray comps = root.value("components").toArray();
+    for (const auto& v : comps) {
+        if (!v.isObject()) continue;
+        const QJsonObject c = v.toObject();
+        const QString name = c.value("name").toString();
+        const QString rel = c.value("file").toString();
+        const int offset = c.value("offset").toInt();
+        const int size = c.value("size").toInt();
+
+        if (name == "__rom_checksum") continue; // derived field
+        if (rel.isEmpty() || offset < 0 || size <= 0) continue;
+
+        QFile f(baseDir.filePath(rel));
+        if (!f.open(QIODevice::ReadOnly)) {
+            if (warnings) warnings->push_back(QString("Missing component file: %1").arg(rel));
+            continue;
+        }
+        const QByteArray data = f.readAll();
+        const int writeLen = qMin(size, data.size());
+        if (offset + writeLen > image.size()) {
+            if (warnings) warnings->push_back(QString("Component out of range skipped: %1").arg(name));
+            continue;
+        }
+        std::copy_n(data.constData(), writeLen, image.data() + offset);
+    }
+
+    // Recompute checksum using effective Kickstart size semantics:
+    // - 256 KiB image: checksum at 256 KiB tail
+    // - 512 KiB image: if mirrored halves, checksum is still 256 KiB-based; otherwise 512 KiB
+    const int effectiveKickSize = detectEffectiveKickSize(image);
+    if (effectiveKickSize > 0 && (effectiveKickSize % 4) == 0) {
+        finalizeKickChecksum(image, effectiveKickSize);
+        if (effectiveKickSize == 256 * 1024 && image.size() == 512 * 1024) {
+            // Keep mirrored representation deterministic after checksum update.
+            image.replace(256 * 1024, 256 * 1024, image.left(256 * 1024));
+        }
+    } else if (warnings) {
+        warnings->push_back(QString("Skipped checksum finalize for non-Kickstart size: %1 bytes").arg(image.size()));
+    }
+
+    *outCanonicalRom = std::move(image);
     return true;
 }
 
