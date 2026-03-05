@@ -95,6 +95,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* btnWriteAll = new QPushButton("Write All (monolithic)", this);
     auto* btnSaveAll  = new QPushButton("Save 2 MiB Buffer…", this);
     auto* btnImportRom = new QPushButton("Import/Analyze ROM…", this);
+    actions->addWidget(btnImportRom);
     auto* btnRebuild = new QPushButton("Rebuild ROM from Catalog…", this);
     actions->addWidget(btnImportRom);
     actions->addWidget(btnRebuild);

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build .)",
+      "Bash(git add BankWidget.cpp BankWidget.h)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(git add BankWidget.cpp)",
+      "Bash(git add BankWidget.cpp RomTools.cpp)"
+    ]
+  }
+}
